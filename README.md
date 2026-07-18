@@ -1,6 +1,6 @@
 # lsrecent
 
-A directory listing grouped by **recency** — with a mechanism for making plain `ls` use it automatically in directories you choose.
+A directory listing grouped by **recency** — with a built-in mechanism for making plain `ls` use it automatically in directories you choose.
 
 Instead of one undifferentiated wall of names, entries are bucketed under conspicuous, color-coded headers by when they were last modified:
 
@@ -24,14 +24,6 @@ My-Weird-Prompts   UniFi-OS-Server-Migration   laptop-nvme-upgrade
 
 The motivating use case: a `~/repos/github` directory with 100+ project folders, where "what was I working on recently?" matters far more than alphabetical order.
 
-## What's in the box
-
-| File | Purpose |
-|------|---------|
-| `lsrecent` | The standalone command. Groups and prints a directory's entries. |
-| `shell-integration.sh` | Bash `ls()` wrapper + `lsr*` helper commands. |
-| `install.sh` | Copies the script to `~/.local/bin`, creates the config, wires up `~/.bashrc`. |
-
 ## Install
 
 ```bash
@@ -40,53 +32,79 @@ cd lsrecent
 ./install.sh
 ```
 
-Or manually: put `lsrecent` on your `PATH` and `source shell-integration.sh` from your `~/.bashrc`.
+That copies the `lsrecent` binary to `~/.local/bin` and adds one line to your `~/.bashrc`:
 
-Requires bash and GNU coreutils (`stat -c`, `date -d`, `ls -w`) — i.e. any normal Linux. On macOS, install coreutils and adjust the `stat`/`date` calls.
+```bash
+eval "$(lsrecent shell-init)"
+```
+
+Nothing else is sourced from the repo — after install, the binary is self-contained and the clone can be deleted.
+
+Requires bash and GNU coreutils (`stat -c`, `date -d`, `ls -w`, `realpath`) — i.e. any normal Linux. On macOS, install coreutils and adjust the `stat`/`date` calls.
 
 ## Usage
 
 ```bash
-lsrecent [dir]    # grouped view of dir (default: current directory)
-lsr [dir]         # short alias for the same
+lsrecent [dir]        # grouped view of dir (default: current directory)
+lsr [dir]             # short alias for the same
 ```
 
-## The inclusion mechanism (automatic `ls` override)
+## The override mechanism
 
-The point of the system is that in *chosen* directories, bare `ls` shows the grouped view without you having to remember a special command — while behaving completely normally everywhere else.
+The point of the system: in *chosen* directories, bare `ls` shows the grouped view without you remembering a special command — while behaving completely normally everywhere else.
 
-### How it works
+The binary is its own backend. It manages an include-list and answers membership queries; the shell wrapper is a four-line function that asks it.
 
-`shell-integration.sh` defines an `ls()` shell function. On each call it:
-
-1. Checks that you passed **no arguments** and that stdout is a **terminal**. If either is false — `ls -la`, `ls somedir`, `ls | grep foo`, `ls` inside a script — it falls straight through to `command ls --color=auto "$@"`. Scripts, pipelines, and muscle memory are never affected.
-2. Reads `~/.config/lsrecent/dirs` — a plain text file, one absolute path per line (`~` is expanded, `#` lines and blanks are ignored).
-3. If `$PWD` exactly matches a listed directory, runs `lsrecent` instead. Otherwise, normal `ls`.
-
-The config file is the single source of truth. Example:
-
-```
-# Directories where plain `ls` shows the lsrecent grouped view.
-~/repos/github
-~/Documents/projects
-/mnt/archive/clients
-```
-
-Matching is exact (no subdirectory inheritance) — enabling `~/repos/github` does **not** change `ls` inside `~/repos/github/some-project`. This is deliberate: inside a project you usually want a conventional listing.
-
-### Adding, removing, and editing overrides
+### Managing the include-list
 
 | Command | Effect |
 |---------|--------|
-| `lsr-add` | Enable the grouped view for the **current** directory |
-| `lsr-add /some/path` | Enable it for another directory |
-| `lsr-remove` | Disable it for the current directory |
-| `lsr-remove /some/path` | Disable it for another directory |
-| `lsr-edit` | Open the config file in `$EDITOR` for manual editing |
+| `lsrecent add` | Enable the grouped view for the **current** directory |
+| `lsrecent add /some/path` | Enable it for another directory |
+| `lsrecent remove` (or `rm`) | Disable it for the current directory |
+| `lsrecent remove /some/path` | Disable it for another directory |
+| `lsrecent list` | Print every directory with the override enabled |
+| `lsrecent edit` | Open the include-list in `$EDITOR` |
+| `lsrecent check [dir]` | Exit 0/1 depending on whether the override is enabled (for scripting) |
 
-`lsr-add` deduplicates (adding the same directory twice is a no-op), and both helpers resolve paths with `realpath`, so relative paths and symlinks work.
+`shell-init` also defines short aliases: `lsr-add`, `lsr-remove`, `lsr-edit`.
 
-Changes take effect immediately in every shell — the config is re-read on each `ls`, so there's nothing to reload.
+`add` validates that the path exists, resolves it with `realpath` (so relative paths and symlinks work), and deduplicates. Changes take effect immediately in every open shell — the list is consulted on each `ls`, so there is nothing to reload.
+
+### Where state lives
+
+`${XDG_CONFIG_HOME:-~/.config}/lsrecent/dirs` — created on first `add`. Deliberately a plain-text file, one absolute path per line (`#` comments and blank lines ignored, leading `~` expanded):
+
+```
+# lsrecent include-list
+/home/you/repos/github
+/home/you/Documents/projects
+/mnt/archive/clients
+```
+
+Plain text rather than JSON because a pure-bash tool shouldn't need `jq` or Python to read its own state, and the file stays trivially hand-editable, greppable, and dotfile-manager-friendly. The CLI is the intended interface; manual edits are equally valid.
+
+### How the `ls` override works
+
+`eval "$(lsrecent shell-init)"` installs this wrapper:
+
+```bash
+ls() {
+    if (( $# == 0 )) && [[ -t 1 ]] && lsrecent check 2>/dev/null; then
+        lsrecent
+    else
+        command ls --color=auto "$@"
+    fi
+}
+```
+
+- **Any arguments → real `ls`.** `ls -la`, `ls somedir` are untouched.
+- **Non-terminal stdout → real `ls`.** Pipes and scripts (`ls | grep foo`) never see the grouped view or its ANSI codes.
+- **Otherwise** the binary is asked whether `$PWD` is on the include-list.
+
+Matching is exact — no subdirectory inheritance. Enabling `~/repos/github` does **not** change `ls` inside `~/repos/github/some-project`; inside a project you usually want a conventional listing.
+
+Because the wrapper's logic lives in the binary (`shell-init`, `check`), updating the binary updates the behavior everywhere — the repo/binary is the single source of truth, and your `.bashrc` never needs to change again.
 
 ## Design notes
 
@@ -95,7 +113,7 @@ Changes take effect immediately in every shell — the config is re-read on each
 - **Ordering within a bucket** is most-recent-first (`ls -t`).
 - **Layout and coloring are delegated to `ls` itself** (`ls -dtC --color=always`), so you get the exact column packing and file-type colors you're used to — the script only does the bucketing and headers.
 - **Headers** are full-width `━` rules with bold bright ANSI colors (green / cyan / yellow / magenta / gray), sized to the terminal width.
-- **The override lives in a function, not an alias**, because it needs per-invocation logic (argument count, tty check, `$PWD` lookup).
+- **The override lives in a shell function**, because changing what bare `ls` does mid-session requires shell-level logic — but the function is deliberately minimal and generated by the binary, so all real behavior stays in one place.
 
 ## License
 

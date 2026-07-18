@@ -1,66 +1,189 @@
 #!/usr/bin/env bash
-# lsrecent — list a directory's entries grouped by last-modified recency.
+# lsrecent — recency-grouped directory listing with a per-directory ls override.
 #
-# Groups: TODAY / PAST WEEK / PAST MONTH / PAST 3 MONTHS / OLDER
-# Within each group, entries are sorted most-recent-first (ls -t).
+# Listing:
+#   lsrecent [dir]           Grouped listing (default: current directory)
 #
-# Usage: lsrecent [directory]   (defaults to the current directory)
+# Override management (the "micro-backend"):
+#   lsrecent add [dir]       Enable the plain-`ls` override for dir (default: .)
+#   lsrecent remove [dir]    Disable the override for dir (default: .)
+#   lsrecent list            Show all directories with the override enabled
+#   lsrecent check [dir]     Exit 0 if dir has the override enabled (quiet;
+#                            used by the ls wrapper)
+#   lsrecent edit            Open the include-list in $EDITOR
 #
-# Plain `ls` can be made to use this view in chosen directories — see the
-# ls() function in ~/.bash_aliases and the list in ~/.config/lsrecent/dirs.
+# Shell integration:
+#   lsrecent shell-init      Print the bash integration. Add to ~/.bashrc:
+#                                eval "$(lsrecent shell-init)"
+#
+# State lives in ${XDG_CONFIG_HOME:-~/.config}/lsrecent/dirs — one absolute
+# path per line; blank lines and #-comments ignored; leading ~ expanded.
 
-target="${1:-.}"
+VERSION="1.0.0"
 
-if [[ ! -d "$target" ]]; then
-    echo "lsrecent: not a directory: $target" >&2
+config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
+config="$config_dir/dirs"
+
+ensure_config() {
+    mkdir -p "$config_dir"
+    if [[ ! -f "$config" ]]; then
+        cat > "$config" <<'EOF'
+# lsrecent include-list: directories where plain `ls` (no arguments) shows the
+# grouped-by-recency view. One absolute path per line; ~ is expanded.
+# Managed by `lsrecent add|remove|edit` — manual edits are fine too.
+EOF
+    fi
+}
+
+resolve() {
+    realpath -- "${1:-$PWD}" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Override management
+# ---------------------------------------------------------------------------
+
+cmd_add() {
+    local d; d=$(resolve "$1") || { echo "lsrecent: no such directory: ${1:-$PWD}" >&2; exit 1; }
+    [[ -d "$d" ]] || { echo "lsrecent: not a directory: $d" >&2; exit 1; }
+    ensure_config
+    if grep -qxF "$d" "$config"; then
+        echo "lsrecent: already enabled for $d"
+    else
+        echo "$d" >> "$config"
+        echo "lsrecent: enabled for $d"
+    fi
+}
+
+cmd_remove() {
+    local d; d=$(resolve "$1") || d="${1:-$PWD}"
+    if [[ -f "$config" ]] && grep -qxF "$d" "$config"; then
+        sed -i "\\#^${d}\$#d" "$config"
+        echo "lsrecent: disabled for $d"
+    else
+        echo "lsrecent: was not enabled for $d"
+    fi
+}
+
+cmd_list() {
+    [[ -f "$config" ]] || return 0
+    local line
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        echo "${line/#\~/$HOME}"
+    done < "$config"
+}
+
+cmd_check() {
+    local d; d=$(resolve "$1") || exit 1
+    local line
+    [[ -f "$config" ]] || exit 1
+    while IFS= read -r line; do
+        [[ -z "$line" || "$line" == \#* ]] && continue
+        [[ "$d" == "${line/#\~/$HOME}" ]] && exit 0
+    done < "$config"
     exit 1
-fi
-
-cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
-now=$(date +%s)
-today=$(date +%Y-%m-%d)
-
-g_today=() g_week=() g_month=() g_quarter=() g_older=()
-
-shopt -s nullglob
-for entry in "$target"/*; do
-    name=${entry##*/}
-    mtime=$(stat -c %Y -- "$entry" 2>/dev/null) || continue
-    if [[ $(date -d "@$mtime" +%Y-%m-%d) == "$today" ]]; then
-        g_today+=("$name")
-        continue
-    fi
-    age_days=$(( (now - mtime) / 86400 ))
-    if   (( age_days <= 7 ));  then g_week+=("$name")
-    elif (( age_days <= 30 )); then g_month+=("$name")
-    elif (( age_days <= 90 )); then g_quarter+=("$name")
-    else                            g_older+=("$name")
-    fi
-done
-
-header() {
-    local color=$1 label=$2 fill
-    local pad=$(( cols - ${#label} - 6 ))
-    (( pad < 3 )) && pad=3
-    printf -v fill '%*s' "$pad" ''
-    printf '\e[1;%sm━━ %s ━%s\e[0m\n' "$color" "$label" "${fill// /━}"
 }
 
-shown=0
-show_group() {
-    local color=$1 label=$2
-    shift 2
-    (( $# == 0 )) && return
-    (( shown )) && echo
-    shown=1
-    header "$color" "$label"
-    ( cd "$target" && command ls -dtC -w "$cols" --color=always -- "$@" )
+cmd_edit() {
+    ensure_config
+    "${EDITOR:-nano}" "$config"
 }
 
-show_group 92 "TODAY"          "${g_today[@]}"
-show_group 96 "PAST WEEK"      "${g_week[@]}"
-show_group 93 "PAST MONTH"     "${g_month[@]}"
-show_group 95 "PAST 3 MONTHS"  "${g_quarter[@]}"
-show_group 90 "OLDER"          "${g_older[@]}"
+cmd_shell_init() {
+    cat <<'EOF'
+alias lsr='lsrecent'
+alias lsr-add='lsrecent add'
+alias lsr-remove='lsrecent remove'
+alias lsr-edit='lsrecent edit'
+ls() {
+    if (( $# == 0 )) && [[ -t 1 ]] && lsrecent check 2>/dev/null; then
+        lsrecent
+    else
+        command ls --color=auto "$@"
+    fi
+}
+EOF
+}
 
-(( shown )) || echo "(empty)"
+# ---------------------------------------------------------------------------
+# Grouped listing
+# ---------------------------------------------------------------------------
+
+cmd_show() {
+    local target="${1:-.}"
+    if [[ ! -d "$target" ]]; then
+        echo "lsrecent: not a directory: $target" >&2
+        exit 1
+    fi
+
+    local cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
+    local now today
+    now=$(date +%s)
+    today=$(date +%Y-%m-%d)
+
+    local g_today=() g_week=() g_month=() g_quarter=() g_older=()
+    local entry name mtime age_days
+
+    shopt -s nullglob
+    for entry in "$target"/*; do
+        name=${entry##*/}
+        mtime=$(stat -c %Y -- "$entry" 2>/dev/null) || continue
+        if [[ $(date -d "@$mtime" +%Y-%m-%d) == "$today" ]]; then
+            g_today+=("$name")
+            continue
+        fi
+        age_days=$(( (now - mtime) / 86400 ))
+        if   (( age_days <= 7 ));  then g_week+=("$name")
+        elif (( age_days <= 30 )); then g_month+=("$name")
+        elif (( age_days <= 90 )); then g_quarter+=("$name")
+        else                            g_older+=("$name")
+        fi
+    done
+
+    local shown=0
+
+    header() {
+        local color=$1 label=$2 fill
+        local pad=$(( cols - ${#label} - 6 ))
+        (( pad < 3 )) && pad=3
+        printf -v fill '%*s' "$pad" ''
+        printf '\e[1;%sm━━ %s ━%s\e[0m\n' "$color" "$label" "${fill// /━}"
+    }
+
+    show_group() {
+        local color=$1 label=$2
+        shift 2
+        (( $# == 0 )) && return
+        (( shown )) && echo
+        shown=1
+        header "$color" "$label"
+        ( cd "$target" && command ls -dtC -w "$cols" --color=always -- "$@" )
+    }
+
+    show_group 92 "TODAY"          "${g_today[@]}"
+    show_group 96 "PAST WEEK"      "${g_week[@]}"
+    show_group 93 "PAST MONTH"     "${g_month[@]}"
+    show_group 95 "PAST 3 MONTHS"  "${g_quarter[@]}"
+    show_group 90 "OLDER"          "${g_older[@]}"
+
+    (( shown )) || echo "(empty)"
+}
+
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
+
+case "${1:-}" in
+    add)         cmd_add "${2:-}" ;;
+    remove|rm)   cmd_remove "${2:-}" ;;
+    list)        cmd_list ;;
+    check)       cmd_check "${2:-}" ;;
+    edit)        cmd_edit ;;
+    shell-init)  cmd_shell_init ;;
+    -v|--version|version) echo "lsrecent $VERSION" ;;
+    -h|--help|help)
+        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+        ;;
+    *)           cmd_show "${1:-}" ;;
+esac
