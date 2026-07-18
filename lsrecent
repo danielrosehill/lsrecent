@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# lsrecent — list a directory's entries grouped by last-modified recency.
+#
+# Groups: TODAY / PAST WEEK / PAST MONTH / PAST 3 MONTHS / OLDER
+# Within each group, entries are sorted most-recent-first (ls -t).
+#
+# Usage: lsrecent [directory]   (defaults to the current directory)
+#
+# Plain `ls` can be made to use this view in chosen directories — see the
+# ls() function in ~/.bash_aliases and the list in ~/.config/lsrecent/dirs.
+
+target="${1:-.}"
+
+if [[ ! -d "$target" ]]; then
+    echo "lsrecent: not a directory: $target" >&2
+    exit 1
+fi
+
+cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
+now=$(date +%s)
+today=$(date +%Y-%m-%d)
+
+g_today=() g_week=() g_month=() g_quarter=() g_older=()
+
+shopt -s nullglob
+for entry in "$target"/*; do
+    name=${entry##*/}
+    mtime=$(stat -c %Y -- "$entry" 2>/dev/null) || continue
+    if [[ $(date -d "@$mtime" +%Y-%m-%d) == "$today" ]]; then
+        g_today+=("$name")
+        continue
+    fi
+    age_days=$(( (now - mtime) / 86400 ))
+    if   (( age_days <= 7 ));  then g_week+=("$name")
+    elif (( age_days <= 30 )); then g_month+=("$name")
+    elif (( age_days <= 90 )); then g_quarter+=("$name")
+    else                            g_older+=("$name")
+    fi
+done
+
+header() {
+    local color=$1 label=$2 fill
+    local pad=$(( cols - ${#label} - 6 ))
+    (( pad < 3 )) && pad=3
+    printf -v fill '%*s' "$pad" ''
+    printf '\e[1;%sm━━ %s ━%s\e[0m\n' "$color" "$label" "${fill// /━}"
+}
+
+shown=0
+show_group() {
+    local color=$1 label=$2
+    shift 2
+    (( $# == 0 )) && return
+    (( shown )) && echo
+    shown=1
+    header "$color" "$label"
+    ( cd "$target" && command ls -dtC -w "$cols" --color=always -- "$@" )
+}
+
+show_group 92 "TODAY"          "${g_today[@]}"
+show_group 96 "PAST WEEK"      "${g_week[@]}"
+show_group 93 "PAST MONTH"     "${g_month[@]}"
+show_group 95 "PAST 3 MONTHS"  "${g_quarter[@]}"
+show_group 90 "OLDER"          "${g_older[@]}"
+
+(( shown )) || echo "(empty)"
