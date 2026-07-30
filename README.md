@@ -222,6 +222,22 @@ lsrecent 1.5.1 (shell integration: 1.5.0 — stale, run `source ~/.bashrc`)
 
 which also reports `loaded` or `not loaded in this shell`.
 
+Re-sourcing into an old shell used to fail outright rather than merely lag. Up to
+1.1.1 the grouped views were aliases; from 1.2.0 they are functions. An interactive
+shell expands aliases before the parser sees `lsrepos()`, so with the 1.1.1 alias
+still resident, `source ~/.bashrc` died on
+
+```
+bash: eval: line NNN: syntax error near unexpected token `('
+bash: eval: line NNN: `lsrepos()     { __lsrecent_list repos "$@"; }'
+```
+
+and — the part that matters — `eval` abandons the rest of the string, so every
+function after that line silently never got defined. Since 1.7.1 `shell-init`
+begins by unaliasing the names it is about to define, so it can always land on top
+of any earlier vintage. In a shell that predates 1.7.1, `unalias lsrepos lstoday`
+first, or just open a new terminal.
+
 ### Why the answer travels through a file
 
 A process cannot `cd` its parent shell — the working directory is per-process, and

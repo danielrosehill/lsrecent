@@ -1,3 +1,13 @@
+lsrecent (1.7.1) unstable; urgency=low
+
+  * shell-init: unalias the names it defines as functions. An alias left over
+    from 1.1.1 or earlier — lsrepos, lstoday — is expanded before the parser
+    reaches `lsrepos()`, so re-sourcing in a long-lived shell died with
+    "syntax error near unexpected token `('" and eval abandoned everything
+    after it. Half the grouped views silently never got defined.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Thu, 30 Jul 2026 18:20:00 +0300
+
 lsrecent (1.7.0) unstable; urgency=low
 
   * The cd prompt is now a browser: search by name or path, page with +, show
