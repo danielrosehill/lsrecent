@@ -3,12 +3,19 @@
 # per-directory ls override and an fzf picker.
 #
 # Listing:
-#   lsrecent [dir]           Grouped listing of dir's children (default: .)
+#   lsrecent [dir]           Grouped listing of dir (default: .). A directory
+#                            that merely groups repositories is listed as
+#                            repositories; a repo is listed by its children.
 #   lsrecent repos [root]    Grouped listing of every git repo under root,
 #                            shown at repo level (topic/repo), newest first
 #   lsrecent today [root]    Only the repos touched today
 #   lsrecent pick [root]     fzf picker over repos; prints the chosen path
 #                            (use the `lsrp` / `lsrt` shell functions to cd)
+#
+# Jumping by number. Repo listings are numbered in recency order — 1 is the most
+# recently touched — and the shell integration binds those numbers, so typing a
+# number and pressing enter cds into it. `lsrecent path N` resolves a number to
+# its path (what the shell functions call).
 #
 # Override management (the "micro-backend"):
 #   lsrecent add [dir]       Enable the plain-`ls` override for dir (default: .)
@@ -29,17 +36,19 @@
 #
 # Config lives in ${XDG_CONFIG_HOME:-~/.config}/lsrecent/dirs — one absolute
 # path per line. The visit log lives in
-# ${XDG_DATA_HOME:-~/.local/share}/lsrecent/opened.log — "<epoch>\t<path>".
+# ${XDG_DATA_HOME:-~/.local/share}/lsrecent/opened.log — "<epoch>\t<path>", and
+# the last listing's numbering in .../lsrecent/last-list — "<n>\t<path>".
 #
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.1.1"
+VERSION="1.2.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
 state_dir="${XDG_DATA_HOME:-$HOME/.local/share}/lsrecent"
 visit_log="$state_dir/opened.log"
+sel_map="$state_dir/last-list"
 
 # Compact the visit log once it grows past this many lines.
 PRUNE_THRESHOLD=5000
@@ -219,12 +228,15 @@ collect_repos() {
     local depth=${LSRECENT_REPO_DEPTH:-4}
     repo_ts=()
 
+    # -mindepth 2 skips "$root/.git", so a root that is itself a repo is not
+    # listed among the repos under it. It also keeps every emitted path strictly
+    # below $root, which is what sorted_repos' prefix strip assumes.
     local ts path
     while IFS=$'\t' read -r ts path; do
         [[ -n "$path" ]] || continue
         ts=${ts%.*}
         (( ts > ${repo_ts[$path]:-0} )) && repo_ts[$path]=$ts
-    done < <(find "$root" -mindepth 1 -maxdepth "$depth" -name .git -prune \
+    done < <(find "$root" -mindepth 2 -maxdepth "$depth" -name .git -prune \
                   -printf '%T@\t%h\n' 2>/dev/null)
 
     (( ${#repo_ts[@]} )) || return 1
@@ -239,6 +251,20 @@ collect_repos() {
         [[ -v repo_ts[$p] ]] || continue
         (( opened_ts[$p] > repo_ts[$p] )) && repo_ts[$p]=${opened_ts[$p]}
     done
+
+    # Explicit: without it the function returns the status of the arithmetic
+    # above, so a visit that is merely not newer than the mtime reads as "no
+    # repositories found" at every call site.
+    return 0
+}
+
+# True if a git repo exists strictly below $1, without walking the whole tree —
+# -quit stops at the first hit, which is the normal case.
+has_nested_repo() {
+    local hit
+    hit=$(find "$1" -mindepth 2 -maxdepth "${LSRECENT_REPO_DEPTH:-4}" \
+               -name .git -print -quit 2>/dev/null)
+    [[ -n "$hit" ]]
 }
 
 # Emits "<epoch>\t<path relative to root>", newest first. With opened_only set,
@@ -272,23 +298,73 @@ print_header() {
     printf '\e[1;%sm━━ %s ━%s\e[0m\n' "$color" "$label" "${fill// /━}"
 }
 
-# Column-pack pre-ordered names. `ls -C` cannot be reused at repo level: it
-# re-sorts operands (or, with -U, only preserves order for names it can resolve
-# from one directory), and repos live under many different parents.
-pack_columns() {
+# Numbering state. sel_n counts up across groups so a repo's number is unique in
+# the whole listing, not just its bucket; sel_total is only needed to size the
+# number column before the first group prints.
+declare -a sel_paths=()
+sel_n=0
+sel_total=0
+
+# Column-pack pre-ordered "display<TAB>abspath" entries, numbering as it goes.
+# `ls -C` cannot be reused at repo level: it re-sorts operands (or, with -U, only
+# preserves order for names it can resolve from one directory), and repos live
+# under many different parents. Filling row-major matters now that entries are
+# numbered — column-major would print 1, 2, 3 down the page instead of across.
+pack_numbered() {
     local cols=$1; shift
-    (( $# )) || return
-    local n max=0
-    for n; do (( ${#n} > max )) && max=${#n}; done
-    local width=$(( max + 2 ))
+    (( $# )) || return 0
+    local e n max=0
+    for e; do
+        n=${e%%$'\t'*}
+        (( ${#n} > max )) && max=${#n}
+    done
+    local numw=${#sel_total}
+    (( numw < 2 )) && numw=2
+    local namew=$(( max + 2 ))
+    local width=$(( numw + 2 + namew ))
     local per=$(( cols / width ))
     (( per < 1 )) && per=1
-    local i=0
-    for n; do
-        printf '\e[01;34m%-*s\e[0m' "$width" "$n"
+    local i=0 path
+    for e; do
+        n=${e%%$'\t'*}
+        path=${e#*$'\t'}
+        (( ++sel_n ))
+        sel_paths[sel_n]=$path
+        printf '\e[90m%*d\e[0m \e[01;34m%-*s\e[0m' \
+            "$numw" "$sel_n" "$namew" "$n"
         (( ++i % per == 0 )) && printf '\n'
     done
     (( i % per )) && printf '\n'
+    return 0
+}
+
+# Persist the numbering so the shell's number-functions can resolve it after the
+# listing process has exited. Written once per listing, replacing the last one.
+write_sel_map() {
+    (( ${#sel_paths[@]} )) || return 0
+    mkdir -p "$state_dir" 2>/dev/null || return 0
+    local tmp i
+    tmp=$(mktemp "$state_dir/last-list.XXXXXX") || return 0
+    for i in "${!sel_paths[@]}"; do
+        printf '%s\t%s\n' "$i" "${sel_paths[$i]}"
+    done > "$tmp"
+    mv -f "$tmp" "$sel_map" 2>/dev/null
+    return 0
+}
+
+# Resolve a number from the last listing to its path.
+cmd_path() {
+    local want=$1
+    [[ "$want" =~ ^[0-9]+$ ]] || die "not a number: $want"
+    [[ -f "$sel_map" ]] || die "no listing recorded yet — run ls, lsrepos or lstoday first"
+    local n p
+    while IFS=$'\t' read -r n p; do
+        [[ "$n" == "$want" ]] || continue
+        [[ -d "$p" ]] || die "gone since the listing: $p"
+        printf '%s\n' "$p"
+        return 0
+    done < "$sel_map"
+    die "no entry $want in the last listing"
 }
 
 # ---------------------------------------------------------------------------
@@ -298,6 +374,17 @@ pack_columns() {
 cmd_show() {
     local target="${1:-.}"
     [[ -d "$target" ]] || die "not a directory: $target"
+
+    # A directory that only groups repositories is more useful listed as
+    # repositories than as children: its subfolders are organisational (a topic
+    # is never the thing being opened) and any loose notes beside them are noise.
+    # A directory that is itself a repo keeps the child listing — there the files
+    # and folders *are* the content.
+    if [[ ! -e "$target/.git" ]] && has_nested_repo "$target"; then
+        local abs; abs=$(resolve "$target") || die "no such directory: $target"
+        cmd_repos "$abs"
+        return
+    fi
 
     local cols; cols=$(term_cols)
     local now midnight
@@ -378,33 +465,41 @@ cmd_repos() {
     now=$(now_epoch)
     midnight=$(midnight_epoch)
 
+    # Entries are "display<TAB>abspath": the display name drops the topic folder
+    # unless --full, but the number has to resolve to a real path, and sorted_repos
+    # yields paths relative to root.
     local g_today=() g_week=() g_month=() g_quarter=() g_older=()
-    local ts name age_days
-    while IFS=$'\t' read -r ts name; do
-        (( full )) || name=${name##*/}
+    local ts rel name entry age_days
+    while IFS=$'\t' read -r ts rel; do
+        [[ -n "$rel" ]] || continue
+        if (( full )); then name=$rel; else name=${rel##*/}; fi
+        entry="$name"$'\t'"$root/$rel"
         if (( ts >= midnight )); then
-            g_today+=("$name")
+            g_today+=("$entry")
             continue
         fi
         (( today_only )) && continue
         age_days=$(( (now - ts) / 86400 ))
-        if   (( age_days <= 7 ));  then g_week+=("$name")
-        elif (( age_days <= 30 )); then g_month+=("$name")
-        elif (( age_days <= 90 )); then g_quarter+=("$name")
-        else                            g_older+=("$name")
+        if   (( age_days <= 7 ));  then g_week+=("$entry")
+        elif (( age_days <= 30 )); then g_month+=("$entry")
+        elif (( age_days <= 90 )); then g_quarter+=("$entry")
+        else                            g_older+=("$entry")
         fi
     done < <(sorted_repos "$root" "$today_only")
+
+    sel_total=$(( ${#g_today[@]} + ${#g_week[@]} + ${#g_month[@]} \
+                  + ${#g_quarter[@]} + ${#g_older[@]} ))
 
     local shown=0
 
     show_group() {
         local color=$1 label=$2
         shift 2
-        (( $# == 0 )) && return
+        (( $# == 0 )) && return 0
         (( shown )) && echo
         shown=1
         print_header "$color" "$label" "$cols"
-        pack_columns "$cols" "$@"
+        pack_numbered "$cols" "$@"
     }
 
     show_group 92 "TODAY"          "${g_today[@]}"
@@ -415,7 +510,10 @@ cmd_repos() {
         show_group 90 "OLDER"          "${g_older[@]}"
     fi
 
-    (( shown )) && return
+    if (( shown )); then
+        write_sel_map
+        return 0
+    fi
 
     if (( today_only )); then
         printf '\e[90mNo repos opened today under %s\e[0m\n' "$root"
@@ -483,14 +581,53 @@ alias lsr='lsrecent'
 alias lsr-add='lsrecent add'
 alias lsr-remove='lsrecent remove'
 alias lsr-edit='lsrecent edit'
-alias lsrepos='COLUMNS=$COLUMNS lsrecent repos'
-alias lstoday='COLUMNS=$COLUMNS lsrecent today'
+
+# Escape hatch: plain `ls`, even in a directory where the grouped view is the
+# default. Takes the same arguments and colours as the real thing.
+lsreg() {
+    command ls --color=auto "$@"
+}
+
+# Typing a number and pressing enter cds into that entry. The numbers have to be
+# real shell functions defined in *this* shell: `command_not_found_handle` is run
+# in a forked subshell, so a cd from there is lost when it exits. That in turn is
+# why the grouped views are functions rather than aliases — they rebind after
+# printing, so the numbers on screen are always the current ones.
+__lsrecent_bound=()
+__lsrecent_bind_numbers() {
+    local n
+    for n in "${__lsrecent_bound[@]}"; do
+        unset -f "$n" 2>/dev/null
+    done
+    __lsrecent_bound=()
+    local map="${XDG_DATA_HOME:-$HOME/.local/share}/lsrecent/last-list"
+    [[ -f $map ]] || return 0
+    while IFS=$'\t' read -r n _; do
+        [[ $n =~ ^[0-9]+$ ]] || continue
+        eval "$n() { __lsrecent_jump $n; }"
+        __lsrecent_bound+=("$n")
+    done < "$map"
+    return 0
+}
+
+__lsrecent_jump() {
+    local d
+    d=$(lsrecent path "$1") || return 1
+    [[ -n $d ]] && cd "$d"
+}
+
+# COLUMNS is set by interactive bash but not exported, so pass it through
+# explicitly — otherwise the binary has to fork `tput`.
+lsrepos() {
+    COLUMNS="${COLUMNS:-}" lsrecent repos "$@" && __lsrecent_bind_numbers
+}
+lstoday() {
+    COLUMNS="${COLUMNS:-}" lsrecent today "$@" && __lsrecent_bind_numbers
+}
 
 ls() {
     if (( $# == 0 )) && [[ -t 1 ]] && lsrecent check 2>/dev/null; then
-        # COLUMNS is set by interactive bash but not exported, so pass it
-        # through explicitly — otherwise the binary has to fork `tput`.
-        COLUMNS="${COLUMNS:-}" lsrecent
+        COLUMNS="${COLUMNS:-}" lsrecent && __lsrecent_bind_numbers
     else
         command ls --color=auto "$@"
     fi
@@ -549,10 +686,11 @@ case "${1:-}" in
     repos)       shift; cmd_repos "$@" ;;
     today)       shift; cmd_repos --today "$@" ;;
     pick)        shift; cmd_pick "$@" ;;
+    path)        cmd_path "${2:-}" ;;
     shell-init)  cmd_shell_init ;;
     -v|--version|version) echo "lsrecent $VERSION" ;;
     -h|--help|help)
-        sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)           cmd_show "${1:-}" ;;
 esac
