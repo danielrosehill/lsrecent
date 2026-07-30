@@ -24,6 +24,15 @@
 # gone. LSRECENT_PROMPT=0 suppresses the prompt (listing only, as before), and
 # `lsrecent path N` resolves a number to its path.
 #
+# The prompt is also a browser, so the screenful is never the limit of what you
+# can reach from it:
+#   23        cd into entry 23 — numbers are the ranking, not the page
+#   text      search labels and paths, case-insensitive; a bare word is a search
+#   /         clear the search, back to the full ranking
+#   +         next page                 -   back to the top of this view
+#   a         everything in this view, unpaged
+#   ?         the same summary          enter, q, ctrl-d   stay put
+#
 # The prompt needs the shell half of the pair to be current: shell-init exports
 # LSRECENT_SHELL with its version, and a listing that finds it missing or older
 # than this binary says so instead of prompting. A shell that was open across an
@@ -31,8 +40,8 @@
 # replaces them. `lsrecent --version` reports both halves.
 #
 # Repo listings stop at one screenful, oldest cut first, and say how many they
-# elided — but the elided repos are numbered too, and the footer gives their
-# range, so a number past the fold still cds. `--all` (`-a`) prints everything;
+# elided — but the elided repos are numbered too, the footer gives their range,
+# and the prompt can page or search into them, so a number past the fold still cds. `--all` (`-a`) prints everything;
 # $LSRECENT_MAX_ROWS overrides the row budget (0 = unlimited). A redirected or
 # piped listing is never truncated.
 #
@@ -63,7 +72,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.6.0"
+VERSION="1.7.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -399,6 +408,10 @@ print_header() {
 # the whole listing, not just its bucket; sel_total is only needed to size the
 # number column before the first group prints.
 declare -a sel_paths=()
+# The label as displayed ("topic/repo"), kept beside the path so the browser can
+# re-render an entry that the first screenful never printed. Without it a search
+# could find a hidden entry but have nothing to show for it but its full path.
+declare -a sel_names=()
 sel_n=0
 sel_total=0
 sel_shown=0
@@ -437,6 +450,7 @@ pack_numbered() {
         path=${e#*$'\t'}
         (( ++sel_n ))
         sel_paths[sel_n]=$path
+        sel_names[sel_n]=$n
         printf '\e[90m%*d\e[0m \e[01;34m%-*s\e[0m' \
             "$pn_numw" "$sel_n" "$pn_namew" "$n"
         (( ++i % pn_per == 0 )) && printf '\n'
@@ -457,6 +471,7 @@ register_hidden() {
     for e; do
         (( ++sel_n ))
         sel_paths[sel_n]=${e#*$'\t'}
+        sel_names[sel_n]=${e%%$'\t'*}
     done
     return 0
 }
@@ -540,16 +555,169 @@ prompt_jump() {
     [[ -n "$dest" ]] || { stale_integration_notice; return 0; }
     [[ -r /dev/tty && -w /dev/tty ]] || return 0
 
-    local reply d
+    browse "$dest"
+}
+
+# --- the browser -------------------------------------------------------------
+#
+# What turns the listing from a screenful into something you cannot fail to get an
+# answer out of. The first screenful is the twenty most recent repositories; the
+# ranking behind it is often hundreds long, and before this the only ways to reach
+# #237 were to abandon the listing for `lsrepos --all` or for fzf. Now the same
+# prompt that takes a number also takes a search, and pages.
+#
+# It stays line-oriented on purpose. A full-screen alternate-screen TUI would be
+# the conventional answer, but this tool's whole premise is that the listing lands
+# in your scrollback and stays there — the numbers are useful precisely because
+# they are still above the cursor after you have moved on. An app that clears the
+# screen on exit throws that away, so each page is printed and scrolls like any
+# other command output.
+#
+# `view` holds ranking positions, never entries. Filtering and paging therefore
+# cannot renumber anything: 237 is the 237th most recently touched repository on
+# the first screen, inside a search, and after `lsrecent path 237` tomorrow.
+declare -a view=()
+view_from=0
+view_filter=''
+
+build_view() {
+    view=()
+    local i hay needle=${view_filter,,}
+    for (( i = 1; i <= sel_n; i++ )); do
+        [[ -n "${sel_names[i]:-}" ]] || continue
+        if [[ -n "$needle" ]]; then
+            # Label and path both, lowercased: "noisy" should find the repo, and
+            # "smart-home" should find everything filed under that topic even
+            # though the topic is only part of some labels.
+            hay=${sel_names[i],,}$'\n'${sel_paths[i],,}
+            [[ "$hay" == *"$needle"* ]] || continue
+        fi
+        view+=( "$i" )
+    done
+    view_from=0
+}
+
+# Print one page of `view` starting at view_from, and advance it. With $1 set,
+# print the lot regardless of the row budget.
+render_page() {
+    local unlimited=${1:-}
+    local total=${#view[@]}
+    if (( total == 0 )); then
+        printf '\e[90mnothing matches "%s" — / on its own clears the search\e[0m\n' \
+            "$view_filter" > /dev/tty
+        return 0
+    fi
+
+    local i n label max=0 cols numw namew per
+    for (( i = view_from; i < total; i++ )); do
+        label=${sel_names[${view[i]}]}
+        (( ${#label} > max )) && max=${#label}
+    done
+    cols=$(term_cols)
+    numw=${#sel_n}
+    (( numw < 2 )) && numw=2
+    namew=$(( max + 2 ))
+    per=$(( cols / (numw + 2 + namew) ))
+    (( per < 1 )) && per=1
+
+    local cap=$(( total - view_from ))
+    if [[ -z "$unlimited" ]]; then
+        local budget; budget=$(row_budget)
+        (( budget > 0 )) && (( budget * per < cap )) && cap=$(( budget * per ))
+    fi
+
+    local printed=0
+    for (( i = view_from; i < view_from + cap; i++ )); do
+        n=${view[i]}
+        printf '\e[90m%*d\e[0m \e[01;34m%-*s\e[0m' \
+            "$numw" "$n" "$namew" "${sel_names[n]}" > /dev/tty
+        (( ++printed % per == 0 )) && printf '\n' > /dev/tty
+    done
+    (( printed % per )) && printf '\n' > /dev/tty
+
+    local first=$(( view_from + 1 )) last=$(( view_from + printed ))
+    view_from=$last
+    local scope=''
+    [[ -n "$view_filter" ]] && scope=" matching \"$view_filter\""
+    if (( view_from < total )); then
+        printf '\e[90m… %d-%d of %d%s · + for the next %d\e[0m\n' \
+            "$first" "$last" "$total" "$scope" \
+            "$(( total - view_from < printed ? total - view_from : printed ))" > /dev/tty
+    else
+        printf '\e[90m… %d-%d of %d%s · end\e[0m\n' \
+            "$first" "$last" "$total" "$scope" > /dev/tty
+    fi
+}
+
+browse_help() {
+    cat > /dev/tty <<EOF
+$(printf '\e[90m')  23        cd into entry 23 — numbers are the ranking, not the page
+  text      search labels and paths for "text" (case-insensitive)
+  /         clear the search and go back to the full ranking
+  +         next page          -    back to the top of this view
+  a         everything in this view, unpaged
+  ?         this          enter, q or ctrl-d    stay put$(printf '\e[0m')
+EOF
+}
+
+browse() {
+    local dest=$1 reply d
+    build_view
+    # The first screenful is already above the prompt — cmd_repos printed it — so
+    # `+` continues the ranking rather than repeating its opening. Only the
+    # unfiltered view inherits this; a search starts from its own first result.
+    view_from=$sel_shown
+
     while :; do
-        printf '\e[90m→ number to cd, enter to stay: \e[0m' > /dev/tty
+        printf '\e[90m→ number, text to search, + more, ? help, enter stays: \e[0m' \
+            > /dev/tty
         # A bare `read` with no reply (EOF from ctrl-d) leaves the cursor mid-line.
         IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
+
         case "$reply" in
-            ''|q|Q) return 0 ;;
+            ''|q|Q)
+                return 0 ;;
+            '?')
+                browse_help; continue ;;
+            '+'|n|N|more)
+                if (( view_from >= ${#view[@]} )); then
+                    printf '\e[90mthat is the end of the list\e[0m\n' > /dev/tty
+                else
+                    render_page
+                fi
+                continue ;;
+            '-'|p|P)
+                # Back to the top rather than a true previous page: the pages are
+                # already in the scrollback above, so scrolling up is the honest
+                # way to see them again, and re-printing them would only make the
+                # same rows appear twice with the same numbers.
+                view_from=0; render_page; continue ;;
+            a|A|all)
+                view_from=0; render_page unlimited; continue ;;
+            /)
+                view_filter=''; build_view; render_page; continue ;;
         esac
-        if [[ ! "$reply" =~ ^[0-9]+$ ]] || [[ -z ${sel_paths[10#$reply]:-} ]]; then
-            printf '\e[90mno entry %s — 1-%d, or enter to stay\e[0m\n' \
+
+        # A leading slash is accepted but not required. Bare text is the more
+        # forgiving default: anyone who types a repository name at a prompt that
+        # invites one means to search for it, and no valid selection is anything
+        # other than digits.
+        if [[ "$reply" == /* ]]; then
+            view_filter=${reply#/}
+            build_view
+            render_page
+            continue
+        fi
+
+        if [[ ! "$reply" =~ ^[0-9]+$ ]]; then
+            view_filter=$reply
+            build_view
+            render_page
+            continue
+        fi
+
+        if [[ -z ${sel_paths[10#$reply]:-} ]]; then
+            printf '\e[90mno entry %s — 1-%d, or text to search\e[0m\n' \
                 "$reply" "$sel_n" > /dev/tty
             continue
         fi

@@ -135,7 +135,7 @@ and the program has done its job — you are standing where you wanted to be:
 $ ls
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   1 lsrecent            2 HVAC_Repair_0726     3 Driving-Checklists
-→ number to cd, enter to stay: 2
+→ number, text to search, + more, ? help, enter stays: 2
 /home/you/repos/github/home-and-property/HVAC_Repair_0726
 $ pwd
 /home/you/repos/github/home-and-property/HVAC_Repair_0726
@@ -144,6 +144,55 @@ $ pwd
 Enter on its own — or `q`, or ctrl-d — stays put. A number outside the ranking, or
 a repo deleted since it was printed, re-asks rather than failing.
 `LSRECENT_PROMPT=0` turns the prompt off and gives you the listing alone.
+
+### The prompt is also a browser
+
+One screenful is twenty-odd repositories and the ranking behind it is often
+hundreds long, so a prompt that only accepted a number could not reach most of
+what it had just numbered. It accepts more than a number:
+
+| Reply | Does |
+| --- | --- |
+| `23` | cd into entry 23 — **numbers are the ranking, not the page** |
+| `text` | search labels and paths for `text`, case-insensitive |
+| `/` | clear the search, back to the full ranking |
+| `+` | next page |
+| `-` | back to the top of the current view |
+| `a` | everything in the current view, unpaged |
+| `?` | the same summary |
+| enter, `q`, ctrl-d | stay put |
+
+A bare word searches. Nothing else a selection could be is anything but digits, so
+typing a repository name at a prompt that has just listed repository names does
+what you meant:
+
+```
+$ ls
+━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1 lsrecent            2 HVAC_Repair_0726     3 Driving-Checklists
+ …
+… 238 more, numbered 21-258 · lsrepos --all to see them
+→ number, text to search, + more, ? help, enter stays: noisy
+ 79 noisycity-api-blueprint
+… 1-1 of 1 matching "noisy" · end
+→ number, text to search, + more, ? help, enter stays: 79
+/home/you/repos/github/smart-home/noisycity-api-blueprint
+```
+
+`79` was never on screen. The search matches the path as well as the label, so a
+topic name (`smart-home`) collects everything filed under it even though the topic
+is not part of a bare basename.
+
+Numbers survive all of it. Filtering and paging move a window over the ranking
+rather than renumbering it, so `79` means the same repository on the first screen,
+inside a search, on page four, and via `lsrecent path 79` tomorrow.
+
+It stays line-oriented rather than becoming a full-screen application, which is a
+deliberate trade. The premise of the tool is that the listing lands in your
+scrollback and stays useful there — an alternate-screen TUI would wipe it on exit,
+taking the numbers with it. So each page prints and scrolls like any other command
+output, and `-` goes back to the top of the view rather than re-printing a previous
+page that is already a few lines up the terminal.
 
 The prompt appears only where something can act on the answer: a listing on a
 terminal, run through the shell integration. Piped or redirected it lists and exits,
@@ -247,6 +296,8 @@ The budget is the terminal height less three rows, so the listing, the footer an
 your prompt all land on one screen. To change or defeat it:
 
 ```bash
++                          # at the prompt: next page, no re-run
+a                          # at the prompt: the rest of the view, unpaged
 lsrepos --all              # or -a: no limit
 LSRECENT_MAX_ROWS=60 ls    # explicit budget; 0 means unlimited
 lsrepos --all | less -R    # if you want a real pager
@@ -254,8 +305,10 @@ lsrepos --all | less -R    # if you want a real pager
 
 A **redirected or piped** listing is never truncated — `lsrecent | wc -l` sees all
 255, the same way `ls` drops its columns when it is not talking to a terminal.
-The numbering covers exactly what was printed, so a number you cannot see is
-never bound to something: in a truncated listing `37` is simply not a command.
+
+None of this is the only way past the fold, and usually not the best one: the
+prompt itself pages with `+` and searches by name, so the elided repos are
+reachable without re-running anything. See [the browser](#the-prompt-is-also-a-browser).
 
 A pager is deliberately not the default. It would take over the screen and demand
 a `q` for a listing you wanted to glance at, and the numbers are only useful while
@@ -341,6 +394,13 @@ just prints the chosen absolute path, so it composes with anything else.
 The picker is for searching by name when you know what you are after. The numbered
 prompt is for the far commoner case of picking off a short recency-ordered list, and
 needs no dependency and no fuzzy-matching in your head.
+
+Since the prompt [searches too](#the-prompt-is-also-a-browser), the two overlap more
+than they used to, and reaching for `lsrp` is no longer the answer to "it wasn't on
+the screen". What the picker still has is fuzzy matching, the commit/status preview
+pane, and a scrolling result list you can arrow through — worth it when you are
+hunting rather than returning. The prompt's search is a plain case-insensitive
+substring, which is what you want when you already know the name.
 
 `fzf` is the tool's only optional dependency — the picker needs it, everything
 else works without it.
