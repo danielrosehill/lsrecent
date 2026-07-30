@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# lsrecent — recency-grouped directory listing with a per-directory ls override.
+# lsrecent — recency-grouped listing, at directory or repository level, with a
+# per-directory ls override and an fzf picker.
 #
 # Listing:
-#   lsrecent [dir]           Grouped listing (default: current directory)
+#   lsrecent [dir]           Grouped listing of dir's children (default: .)
+#   lsrecent repos [root]    Grouped listing of every git repo under root,
+#                            shown at repo level (topic/repo), newest first
+#   lsrecent today [root]    Only the repos touched today
+#   lsrecent pick [root]     fzf picker over repos; prints the chosen path
+#                            (use the `lsrp` / `lsrt` shell functions to cd)
 #
 # Override management (the "micro-backend"):
 #   lsrecent add [dir]       Enable the plain-`ls` override for dir (default: .)
@@ -12,17 +18,33 @@
 #                            used by the ls wrapper)
 #   lsrecent edit            Open the include-list in $EDITOR
 #
+# Visit log (what "opened" means):
+#   lsrecent visit [dir]     Record a visit to dir (the shell hook does this
+#                            inline; this is the fallback for other shells)
+#   lsrecent prune           Compact the visit log
+#
 # Shell integration:
 #   lsrecent shell-init      Print the bash integration. Add to ~/.bashrc:
 #                                eval "$(lsrecent shell-init)"
 #
-# State lives in ${XDG_CONFIG_HOME:-~/.config}/lsrecent/dirs — one absolute
-# path per line; blank lines and #-comments ignored; leading ~ expanded.
+# Config lives in ${XDG_CONFIG_HOME:-~/.config}/lsrecent/dirs — one absolute
+# path per line. The visit log lives in
+# ${XDG_DATA_HOME:-~/.local/share}/lsrecent/opened.log — "<epoch>\t<path>".
+#
+# Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
+# Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
+state_dir="${XDG_DATA_HOME:-$HOME/.local/share}/lsrecent"
+visit_log="$state_dir/opened.log"
+
+# Compact the visit log once it grows past this many lines.
+PRUNE_THRESHOLD=5000
+# Drop visits older than this during a prune.
+PRUNE_MAX_AGE_DAYS=180
 
 ensure_config() {
     mkdir -p "$config_dir"
@@ -39,13 +61,18 @@ resolve() {
     realpath -- "${1:-$PWD}" 2>/dev/null
 }
 
+die() {
+    echo "lsrecent: $*" >&2
+    exit 1
+}
+
 # ---------------------------------------------------------------------------
 # Override management
 # ---------------------------------------------------------------------------
 
 cmd_add() {
-    local d; d=$(resolve "$1") || { echo "lsrecent: no such directory: ${1:-$PWD}" >&2; exit 1; }
-    [[ -d "$d" ]] || { echo "lsrecent: not a directory: $d" >&2; exit 1; }
+    local d; d=$(resolve "$1") || die "no such directory: ${1:-$PWD}"
+    [[ -d "$d" ]] || die "not a directory: $d"
     ensure_config
     if grep -qxF "$d" "$config"; then
         echo "lsrecent: already enabled for $d"
@@ -90,37 +117,163 @@ cmd_edit() {
     "${EDITOR:-nano}" "$config"
 }
 
-cmd_shell_init() {
-    cat <<'EOF'
-alias lsr='lsrecent'
-alias lsr-add='lsrecent add'
-alias lsr-remove='lsrecent remove'
-alias lsr-edit='lsrecent edit'
-ls() {
-    if (( $# == 0 )) && [[ -t 1 ]] && lsrecent check 2>/dev/null; then
-        lsrecent
-    else
-        command ls --color=auto "$@"
-    fi
+# ---------------------------------------------------------------------------
+# Visit log
+#
+# mtime answers "when did this change", not "when did I open it" — cd-ing into
+# a repo touches nothing, and editing a nested file leaves the repo directory's
+# own mtime alone. The visit log is the only honest source for "opened today",
+# so it is recorded by the shell hook on every directory change.
+# ---------------------------------------------------------------------------
+
+cmd_visit() {
+    local d; d=$(resolve "$1") || return 0
+    [[ -e "$d/.git" ]] || return 0
+    mkdir -p "$state_dir" 2>/dev/null || return 0
+    printf '%s\t%s\n' "$(date +%s)" "$d" >> "$visit_log" 2>/dev/null
+    return 0
 }
-EOF
+
+cmd_prune() {
+    [[ -f "$visit_log" ]] || return 0
+    local cutoff=$(( $(date +%s) - PRUNE_MAX_AGE_DAYS * 86400 ))
+    local tmp; tmp=$(mktemp "$state_dir/opened.XXXXXX") || return 0
+    local -A keep=()
+    local t p
+    while IFS=$'\t' read -r t p; do
+        [[ -n "$p" && "$t" =~ ^[0-9]+$ ]] || continue
+        (( t < cutoff )) && continue
+        [[ -d "$p" ]] || continue
+        (( t > ${keep[$p]:-0} )) && keep[$p]=$t
+    done < "$visit_log"
+    for p in "${!keep[@]}"; do
+        printf '%s\t%s\n' "${keep[$p]}" "$p"
+    done | sort -n > "$tmp"
+    mv -f "$tmp" "$visit_log"
+}
+
+declare -A opened_ts=()
+
+load_visits() {
+    opened_ts=()
+    [[ -f "$visit_log" ]] || return 0
+    local lines
+    lines=$(wc -l < "$visit_log" 2>/dev/null) || lines=0
+    (( lines > PRUNE_THRESHOLD )) && cmd_prune
+    local t p
+    while IFS=$'\t' read -r t p; do
+        [[ -n "$p" && "$t" =~ ^[0-9]+$ ]] || continue
+        (( t > ${opened_ts[$p]:-0} )) && opened_ts[$p]=$t
+    done < "$visit_log"
 }
 
 # ---------------------------------------------------------------------------
-# Grouped listing
+# Repository discovery
+# ---------------------------------------------------------------------------
+
+default_root() {
+    local r
+    for r in "${LSRECENT_REPO_ROOT:-}" "$HOME/repos/github" "$HOME/repos"; do
+        [[ -n "$r" && -d "$r" ]] && { echo "$r"; return; }
+    done
+    echo "$PWD"
+}
+
+declare -A repo_ts=()
+
+# Populates repo_ts[abs_path] = best-known "last touched" epoch, which is the
+# newest of: the recorded visit, the repo directory's mtime, and .git's mtime
+# (the last catches commits, checkouts and fetches that leave the worktree
+# directory itself untouched).
+collect_repos() {
+    local root=$1
+    local depth=${LSRECENT_REPO_DEPTH:-4}
+    repo_ts=()
+
+    local ts path
+    while IFS=$'\t' read -r ts path; do
+        [[ -n "$path" ]] || continue
+        ts=${ts%.*}
+        (( ts > ${repo_ts[$path]:-0} )) && repo_ts[$path]=$ts
+    done < <(find "$root" -mindepth 1 -maxdepth "$depth" -name .git -prune \
+                  -printf '%T@\t%h\n' 2>/dev/null)
+
+    (( ${#repo_ts[@]} )) || return 1
+
+    local m p
+    while IFS='|' read -r m p; do
+        [[ -n "$p" ]] || continue
+        (( m > ${repo_ts[$p]:-0} )) && repo_ts[$p]=$m
+    done < <(stat -c '%Y|%n' -- "${!repo_ts[@]}" 2>/dev/null)
+
+    for p in "${!opened_ts[@]}"; do
+        [[ -v repo_ts[$p] ]] || continue
+        (( opened_ts[$p] > repo_ts[$p] )) && repo_ts[$p]=${opened_ts[$p]}
+    done
+}
+
+# Emits "<epoch>\t<path relative to root>", newest first. With opened_only set,
+# only repos with a recorded visit are emitted, timestamped by that visit —
+# "when did I open this", with mtime ignored entirely.
+sorted_repos() {
+    local root=$1 opened_only=${2:-0} p
+    for p in "${!repo_ts[@]}"; do
+        if (( opened_only )); then
+            [[ -v opened_ts[$p] ]] || continue
+            printf '%s\t%s\n' "${opened_ts[$p]}" "${p#"$root"/}"
+        else
+            printf '%s\t%s\n' "${repo_ts[$p]}" "${p#"$root"/}"
+        fi
+    done | sort -rn
+}
+
+# ---------------------------------------------------------------------------
+# Presentation
+# ---------------------------------------------------------------------------
+
+term_cols() {
+    echo "${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}"
+}
+
+print_header() {
+    local color=$1 label=$2 cols=$3 fill
+    local pad=$(( cols - ${#label} - 6 ))
+    (( pad < 3 )) && pad=3
+    printf -v fill '%*s' "$pad" ''
+    printf '\e[1;%sm━━ %s ━%s\e[0m\n' "$color" "$label" "${fill// /━}"
+}
+
+# Column-pack pre-ordered names. `ls -C` cannot be reused at repo level: it
+# re-sorts operands (or, with -U, only preserves order for names it can resolve
+# from one directory), and repos live under many different parents.
+pack_columns() {
+    local cols=$1; shift
+    (( $# )) || return
+    local n max=0
+    for n; do (( ${#n} > max )) && max=${#n}; done
+    local width=$(( max + 2 ))
+    local per=$(( cols / width ))
+    (( per < 1 )) && per=1
+    local i=0
+    for n; do
+        printf '\e[01;34m%-*s\e[0m' "$width" "$n"
+        (( ++i % per == 0 )) && printf '\n'
+    done
+    (( i % per )) && printf '\n'
+}
+
+# ---------------------------------------------------------------------------
+# Grouped listing — directory level (original behaviour)
 # ---------------------------------------------------------------------------
 
 cmd_show() {
     local target="${1:-.}"
-    if [[ ! -d "$target" ]]; then
-        echo "lsrecent: not a directory: $target" >&2
-        exit 1
-    fi
+    [[ -d "$target" ]] || die "not a directory: $target"
 
-    local cols=${COLUMNS:-$(tput cols 2>/dev/null || echo 80)}
-    local now today
+    local cols; cols=$(term_cols)
+    local now midnight
     now=$(date +%s)
-    today=$(date +%Y-%m-%d)
+    midnight=$(date -d "today 00:00:00" +%s)
 
     local g_today=() g_week=() g_month=() g_quarter=() g_older=()
     local entry name mtime age_days
@@ -129,7 +282,7 @@ cmd_show() {
     for entry in "$target"/*; do
         name=${entry##*/}
         mtime=$(stat -c %Y -- "$entry" 2>/dev/null) || continue
-        if [[ $(date -d "@$mtime" +%Y-%m-%d) == "$today" ]]; then
+        if (( mtime >= midnight )); then
             g_today+=("$name")
             continue
         fi
@@ -143,21 +296,13 @@ cmd_show() {
 
     local shown=0
 
-    header() {
-        local color=$1 label=$2 fill
-        local pad=$(( cols - ${#label} - 6 ))
-        (( pad < 3 )) && pad=3
-        printf -v fill '%*s' "$pad" ''
-        printf '\e[1;%sm━━ %s ━%s\e[0m\n' "$color" "$label" "${fill// /━}"
-    }
-
     show_group() {
         local color=$1 label=$2
         shift 2
         (( $# == 0 )) && return
         (( shown )) && echo
         shown=1
-        header "$color" "$label"
+        print_header "$color" "$label" "$cols"
         ( cd "$target" && command ls -dtC -w "$cols" --color=always -- "$@" )
     }
 
@@ -171,6 +316,187 @@ cmd_show() {
 }
 
 # ---------------------------------------------------------------------------
+# Grouped listing — repository level
+# ---------------------------------------------------------------------------
+
+cmd_repos() {
+    local today_only=0 full=0 root=""
+    while (( $# )); do
+        case "$1" in
+            --today) today_only=1 ;;
+            --full)  full=1 ;;
+            -*)      die "unknown option: $1" ;;
+            *)       root=$1 ;;
+        esac
+        shift
+    done
+    [[ -n "$root" ]] || root=$(default_root)
+    root=$(resolve "$root") || die "no such directory: $root"
+    [[ -d "$root" ]] || die "not a directory: $root"
+
+    load_visits
+    collect_repos "$root" || die "no git repositories under $root"
+
+    local cols; cols=$(term_cols)
+    local now midnight
+    now=$(date +%s)
+    midnight=$(date -d "today 00:00:00" +%s)
+
+    local g_today=() g_week=() g_month=() g_quarter=() g_older=()
+    local ts name age_days
+    while IFS=$'\t' read -r ts name; do
+        (( full )) || name=${name##*/}
+        if (( ts >= midnight )); then
+            g_today+=("$name")
+            continue
+        fi
+        (( today_only )) && continue
+        age_days=$(( (now - ts) / 86400 ))
+        if   (( age_days <= 7 ));  then g_week+=("$name")
+        elif (( age_days <= 30 )); then g_month+=("$name")
+        elif (( age_days <= 90 )); then g_quarter+=("$name")
+        else                            g_older+=("$name")
+        fi
+    done < <(sorted_repos "$root" "$today_only")
+
+    local shown=0
+
+    show_group() {
+        local color=$1 label=$2
+        shift 2
+        (( $# == 0 )) && return
+        (( shown )) && echo
+        shown=1
+        print_header "$color" "$label" "$cols"
+        pack_columns "$cols" "$@"
+    }
+
+    show_group 92 "TODAY"          "${g_today[@]}"
+    if (( ! today_only )); then
+        show_group 96 "PAST WEEK"      "${g_week[@]}"
+        show_group 93 "PAST MONTH"     "${g_month[@]}"
+        show_group 95 "PAST 3 MONTHS"  "${g_quarter[@]}"
+        show_group 90 "OLDER"          "${g_older[@]}"
+    fi
+
+    (( shown )) && return
+
+    if (( today_only )); then
+        printf '\e[90mNo repos opened today under %s\e[0m\n' "$root"
+        [[ -s "$visit_log" ]] || printf '\e[90mThe visit log is empty — it starts filling once the shell hook is loaded (open a new shell).\e[0m\n'
+    else
+        echo "(no repositories found under $root)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Picker
+# ---------------------------------------------------------------------------
+
+cmd_pick() {
+    local today_only=0 root=""
+    while (( $# )); do
+        case "$1" in
+            --today) today_only=1 ;;
+            -*)      die "unknown option: $1" ;;
+            *)       root=$1 ;;
+        esac
+        shift
+    done
+    command -v fzf >/dev/null || die "pick requires fzf"
+    [[ -n "$root" ]] || root=$(default_root)
+    root=$(resolve "$root") || die "no such directory: $root"
+
+    load_visits
+    collect_repos "$root" || die "no git repositories under $root"
+
+    local midnight; midnight=$(date -d "today 00:00:00" +%s)
+    local names=() ts name
+    while IFS=$'\t' read -r ts name; do
+        (( today_only && ts < midnight )) && continue
+        names+=("$name")
+    done < <(sorted_repos "$root" "$today_only")
+
+    (( ${#names[@]} )) || die "nothing to pick"
+
+    local prompt="repo> "
+    (( today_only )) && prompt="today> "
+
+    local preview='p='"$(printf '%q' "$root")"'/{}
+        git -C "$p" -c color.ui=always log --oneline -8 2>/dev/null
+        echo
+        git -C "$p" -c color.ui=always status -sb 2>/dev/null | head -15'
+
+    local sel
+    sel=$(printf '%s\n' "${names[@]}" | fzf \
+            --ansi --no-sort --height=60% --reverse \
+            --prompt="$prompt" \
+            --preview="$preview" \
+            --preview-window=right,55%,border-left) || return 1
+
+    [[ -n "$sel" ]] && printf '%s\n' "$root/$sel"
+}
+
+# ---------------------------------------------------------------------------
+# Shell integration
+# ---------------------------------------------------------------------------
+
+cmd_shell_init() {
+    cat <<'EOF'
+alias lsr='lsrecent'
+alias lsr-add='lsrecent add'
+alias lsr-remove='lsrecent remove'
+alias lsr-edit='lsrecent edit'
+alias lsrepos='lsrecent repos'
+alias lstoday='lsrecent today'
+
+ls() {
+    if (( $# == 0 )) && [[ -t 1 ]] && lsrecent check 2>/dev/null; then
+        lsrecent
+    else
+        command ls --color=auto "$@"
+    fi
+}
+
+# Pick a repo and cd into it. `lsrp` = all repos, `lsrt` = today's only.
+lsrp() {
+    local d
+    d=$(lsrecent pick "$@") && [[ -n "$d" ]] && cd "$d"
+}
+lsrt() {
+    lsrp --today "$@"
+}
+
+# Visit logging. Deliberately inline rather than a call into the binary: this
+# runs on every prompt, so it must not fork. The binary's `lsrecent visit` is
+# the equivalent for non-bash shells.
+__lsrecent_state="${XDG_DATA_HOME:-$HOME/.local/share}/lsrecent"
+[[ -d $__lsrecent_state ]] || mkdir -p "$__lsrecent_state" 2>/dev/null
+__lsrecent_last=""
+__lsrecent_visit() {
+    [[ $PWD == "$__lsrecent_last" ]] && return
+    __lsrecent_last=$PWD
+    [[ -e $PWD/.git ]] || return
+    printf '%s\t%s\n' "${EPOCHSECONDS:-$(date +%s)}" "$PWD" \
+        >> "$__lsrecent_state/opened.log" 2>/dev/null
+}
+if [[ ${PROMPT_COMMAND@a} == *a* ]]; then
+    __lsrecent_found=0
+    for __lsrecent_pc in "${PROMPT_COMMAND[@]}"; do
+        [[ $__lsrecent_pc == *__lsrecent_visit* ]] && __lsrecent_found=1
+    done
+    (( __lsrecent_found )) || PROMPT_COMMAND=(__lsrecent_visit "${PROMPT_COMMAND[@]}")
+    unset __lsrecent_found __lsrecent_pc
+else
+    case "$PROMPT_COMMAND" in
+        *__lsrecent_visit*) ;;
+        *) PROMPT_COMMAND="__lsrecent_visit${PROMPT_COMMAND:+; $PROMPT_COMMAND}" ;;
+    esac
+fi
+EOF
+}
+
+# ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
 
@@ -180,10 +506,15 @@ case "${1:-}" in
     list)        cmd_list ;;
     check)       cmd_check "${2:-}" ;;
     edit)        cmd_edit ;;
+    visit)       cmd_visit "${2:-}" ;;
+    prune)       load_visits; cmd_prune ;;
+    repos)       shift; cmd_repos "$@" ;;
+    today)       shift; cmd_repos --today "$@" ;;
+    pick)        shift; cmd_pick "$@" ;;
     shell-init)  cmd_shell_init ;;
     -v|--version|version) echo "lsrecent $VERSION" ;;
     -h|--help|help)
-        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)           cmd_show "${1:-}" ;;
 esac
