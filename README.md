@@ -121,8 +121,8 @@ $ pwd
 /home/you/repos/github/home-and-property/HVAC_Repair_0726
 ```
 
-Enter on its own — or `q`, or ctrl-d — stays put. A number that was not in the
-listing, or a repo deleted since it was printed, re-asks rather than failing.
+Enter on its own — or `q`, or ctrl-d — stays put. A number outside the ranking, or
+a repo deleted since it was printed, re-asks rather than failing.
 `LSRECENT_PROMPT=0` turns the prompt off and gives you the listing alone.
 
 The prompt appears only where something can act on the answer: a listing on a
@@ -162,10 +162,12 @@ $ 2                       # still goes where 2 pointed
 Each listing writes its numbering to
 `${XDG_DATA_HOME:-~/.local/share}/lsrecent/last-list` as `<n>\t<path>` lines, and
 `lsrecent path N` resolves a number against it (erroring if the path has since
-been deleted). The numbers themselves are shell *functions* named `1`, `2`, … —
-bash permits that — defined by `shell-init`'s `__lsrecent_bind_numbers`, which is
-re-run after every listing so stale numbers are unbound rather than left pointing
-somewhere wrong.
+been deleted). The map covers the whole ranking, not just the printed screenful.
+The numbers themselves are shell *functions* named `1`, `2`, … — bash permits that
+— defined by `shell-init`'s `__lsrecent_bind_numbers`, which is re-run after every
+listing so stale numbers are unbound rather than left pointing somewhere wrong. It
+defines them in a single `eval` because a full listing here is a couple of hundred
+of them, not twenty.
 
 The obvious-looking alternative, `command_not_found_handle`, cannot work:
 bash runs that handler in a forked subshell, so any `cd` it performs dies with the
@@ -183,8 +185,14 @@ screen is full and tell you what they left out:
 ━━ PAST WEEK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  31 DSR-Holdings-Cloud   32 dsrholdings-accounting-plugin
  33 Israel-Cable-Sourcing   34 Hebrew-Tech-Vocab
-… 219 more · lsrepos --all
+… 219 more, numbered 35-253 · lsrepos --all to see them
 ```
+
+**Cutting the listing does not cut the numbering.** Every repo in the ranking gets
+a number whether or not it fit on the screen, which is why the footer gives the
+range it elided: `35` at the prompt cds into the thirty-fifth repo even though you
+never saw its name, and the path is echoed so you can see where you landed. `--all`
+is for when you want to read the names, not a precondition for reaching them.
 
 Truncation is only sound here because of the ordering: groups run newest-first
 and so do their contents, so cutting from the end drops precisely the repos you

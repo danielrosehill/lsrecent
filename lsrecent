@@ -25,8 +25,10 @@
 # `lsrecent path N` resolves a number to its path.
 #
 # Repo listings stop at one screenful, oldest cut first, and say how many they
-# elided. `--all` (`-a`) prints everything; $LSRECENT_MAX_ROWS overrides the row
-# budget (0 = unlimited). A redirected or piped listing is never truncated.
+# elided — but the elided repos are numbered too, and the footer gives their
+# range, so a number past the fold still cds. `--all` (`-a`) prints everything;
+# $LSRECENT_MAX_ROWS overrides the row budget (0 = unlimited). A redirected or
+# piped listing is never truncated.
 #
 # Override management (the "micro-backend"):
 #   lsrecent add [dir]       Enable the plain-`ls` override for dir (default: .)
@@ -53,7 +55,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.4.0"
+VERSION="1.5.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -386,6 +388,7 @@ print_header() {
 declare -a sel_paths=()
 sel_n=0
 sel_total=0
+sel_shown=0
 
 # How wide a group's columns must be and how many fit on a row. Split out of the
 # printing so a group's row count is known *before* anything is emitted, which is
@@ -426,6 +429,22 @@ pack_numbered() {
         (( ++i % pn_per == 0 )) && printf '\n'
     done
     (( i % pn_per )) && printf '\n'
+    return 0
+}
+
+# Number the entries that did not fit, without printing them. The listing is cut
+# to one screenful but the ranking behind it is not, so a repo below the fold
+# still gets a number and "23" resolves whether or not 23 was on screen. Without
+# this the numbering stopped at the fold, which made every repo past the twentieth
+# unreachable by the one mechanism the tool exists for. Only ever called after the
+# last printed group — once anything is elided nothing later prints — so appending
+# here cannot disturb the numbers already shown.
+register_hidden() {
+    local e
+    for e; do
+        (( ++sel_n ))
+        sel_paths[sel_n]=${e#*$'\t'}
+    done
     return 0
 }
 
@@ -496,8 +515,8 @@ prompt_jump() {
             ''|q|Q) return 0 ;;
         esac
         if [[ ! "$reply" =~ ^[0-9]+$ ]] || [[ -z ${sel_paths[10#$reply]:-} ]]; then
-            printf '\e[90mno entry %s — a number from the listing, or enter to stay\e[0m\n' \
-                "$reply" > /dev/tty
+            printf '\e[90mno entry %s — 1-%d, or enter to stay\e[0m\n' \
+                "$reply" "$sel_n" > /dev/tty
             continue
         fi
         d=${sel_paths[10#$reply]}
@@ -697,6 +716,7 @@ cmd_repos() {
         # the recency order the whole listing is built on.
         if (( hidden )); then
             hidden=$(( hidden + count ))
+            register_hidden "${grp[@]}"
             continue
         fi
 
@@ -714,6 +734,7 @@ cmd_repos() {
             (( shown == 0 && avail < 1 )) && avail=1
             if (( avail < 1 )); then
                 hidden=$(( hidden + count ))
+                register_hidden "${grp[@]}"
                 continue
             fi
             if (( rows_needed > avail )); then
@@ -727,6 +748,8 @@ cmd_repos() {
         shown=1
         print_header "${group_colors[$i]}" "${group_labels[$i]}" "$cols"
         pack_numbered "${grp[@]:0:take}"
+        sel_shown=$sel_n
+        (( take < count )) && register_hidden "${grp[@]:take}"
         used=$(( used + overhead + rows_needed ))
         hidden=$(( hidden + count - take ))
     done
@@ -738,7 +761,10 @@ cmd_repos() {
                 today)     hint="lstoday" ;;
                 yesterday) hint="lsyesterday" ;;
             esac
-            printf '\e[90m… %d more · %s --all\e[0m\n' "$hidden" "$hint"
+            # The elided repos are still numbered, so the footer names the range
+            # rather than only offering --all: typing 23 works from here.
+            printf '\e[90m… %d more, numbered %d-%d · %s --all to see them\e[0m\n' \
+                "$hidden" "$(( sel_shown + 1 ))" "$sel_n" "$hint"
         fi
         write_sel_map
         prompt_jump
@@ -828,18 +854,21 @@ lsreg() {
 # so the numbers on screen are always the current ones.
 __lsrecent_bound=()
 __lsrecent_bind_numbers() {
-    local n
-    for n in "${__lsrecent_bound[@]}"; do
-        unset -f "$n" 2>/dev/null
-    done
+    (( ${#__lsrecent_bound[@]} )) && unset -f "${__lsrecent_bound[@]}" 2>/dev/null
     __lsrecent_bound=()
     local map="${XDG_DATA_HOME:-$HOME/.local/share}/lsrecent/last-list"
     [[ -f $map ]] || return 0
+    # One eval for the whole map, not one per number: the map covers every repo in
+    # the ranking, not just the screenful that was printed, so this is a couple of
+    # hundred definitions on a listing rather than twenty.
+    local n defs=""
     while IFS=$'\t' read -r n _; do
         [[ $n =~ ^[0-9]+$ ]] || continue
-        eval "$n() { __lsrecent_jump $n; }"
+        defs+="$n() { __lsrecent_jump $n; }
+"
         __lsrecent_bound+=("$n")
     done < "$map"
+    [[ -n $defs ]] && eval "$defs"
     return 0
 }
 
