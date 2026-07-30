@@ -1,37 +1,28 @@
 #!/usr/bin/env bash
-# Install lsrecent: binary to ~/.local/bin, shell integration into ~/.bashrc.
+# Install lsrecent from the source tree into ~/.local — no root, no packaging.
+# For a system-wide install, build the .deb instead: ./build-deb.sh
 set -e
 cd "$(dirname "$0")"
 
-mkdir -p ~/.local/bin
+mkdir -p ~/.local/bin ~/.local/share/applications
 install -m 755 lsrecent ~/.local/bin/lsrecent
+install -m 755 lsrecent-gui ~/.local/bin/lsrecent-gui
+install -m 644 packaging/lsrecent.desktop ~/.local/share/applications/lsrecent.desktop
+command -v update-desktop-database >/dev/null 2>&1 \
+    && update-desktop-database -q ~/.local/share/applications || true
 
-# Look for the eval itself, in every file bash might source it from — not just for
-# our own marker comment in ~/.bashrc. Someone who put the line in ~/.bash_aliases
-# by hand has the integration installed, and a second eval there is redundant
-# clutter: everything shell-init defines is a redefinition, so the duplicate is
-# harmless but has to be found and removed by hand later.
-installed=""
-for f in ~/.bashrc ~/.bash_aliases ~/.bash_profile ~/.profile; do
-    [[ -f "$f" ]] || continue
-    if grep -q 'lsrecent shell-init' "$f" 2>/dev/null; then installed="$f"; break; fi
-done
+# The binary owns this logic (`shell-install`), so the .deb, which has no
+# install.sh to call, and this script cannot drift apart. Run through the freshly
+# installed copy rather than ./lsrecent: an older one on PATH would be the thing
+# actually executed afterwards, and that is worth finding out now.
+~/.local/bin/lsrecent shell-install
 
-if [[ -n "$installed" ]]; then
-    echo "Shell integration already present in $installed — skipped"
-else
-    {
-        echo ""
-        echo "# lsrecent shell integration"
-        echo 'eval "$(lsrecent shell-init)"'
-    } >> ~/.bashrc
-    echo "Added shell integration to ~/.bashrc"
-fi
-
+echo
 echo "Installed. Open a new terminal (or 'source ~/.bashrc'), then:"
 echo "  lsrecent            # grouped view of the current directory"
 echo "  lsrecent add        # make plain 'ls' use the grouped view here"
 echo "  lsrecent list       # see where the override is enabled"
+echo "  lsrecent gui        # add/remove those directories in a window"
 echo "  lstoday             # repos opened today; type a number to cd into one"
 echo "  lsyesterday         # repos whose last visit was yesterday"
 echo "  lsreg               # plain 'ls' where the grouped view is the default"

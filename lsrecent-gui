@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""lsrecent-gui — manage which directories plain `ls` shows the grouped view in.
+
+This window is a front end to the `lsrecent` binary and nothing more. It never
+reads or writes the include-list itself: rows come from `lsrecent list`, changes
+go out through `lsrecent add` / `lsrecent remove`, and the list is re-read after
+each one. The binary already owns the file format, tilde expansion, realpath
+resolution and deduplication, and a second implementation of any of that in
+another language is exactly how the two come to disagree.
+
+That also means the status line can quote the binary's own reply verbatim
+("already enabled for …", "was not enabled for …") rather than the GUI guessing
+what happened.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+BINARY = "lsrecent"
+
+
+def run(*args):
+    """Call the binary and hand back (ok, output). Both halves of the result are
+    used: `add` reports "already enabled" on stdout with exit status 0, so the
+    text matters even when nothing failed."""
+    try:
+        p = subprocess.run(
+            [BINARY, *args], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)
+    out = (p.stdout + p.stderr).strip()
+    return p.returncode == 0, out
+
+
+def start_dir():
+    """Where the directory chooser opens. The repo root is the overwhelmingly
+    likely target, and it is the same guess the binary makes."""
+    for d in (
+        os.environ.get("LSRECENT_REPO_ROOT", ""),
+        os.path.expanduser("~/repos/github"),
+        os.path.expanduser("~/repos"),
+    ):
+        if d and os.path.isdir(d):
+            return d
+    return os.path.expanduser("~")
+
+
+class Window(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("lsrecent — grouped ls directories")
+        self.setWindowIcon(QIcon.fromTheme("folder-recent"))
+        self.resize(620, 420)
+
+        blurb = QLabel(
+            "In these directories, plain <code>ls</code> shows the "
+            "recency-grouped listing with numbered repositories. Everywhere "
+            "else it stays the normal <code>ls</code>."
+        )
+        blurb.setWordWrap(True)
+
+        self.list = QListWidget()
+        self.list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.list.itemSelectionChanged.connect(self.sync_buttons)
+
+        self.add_btn = QPushButton(QIcon.fromTheme("list-add"), "Add directory…")
+        self.rm_btn = QPushButton(QIcon.fromTheme("list-remove"), "Remove")
+        self.add_btn.clicked.connect(self.add)
+        self.rm_btn.clicked.connect(self.remove)
+
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.add_btn)
+        buttons.addWidget(self.rm_btn)
+        buttons.addStretch()
+
+        # Said plainly because it is the first thing anyone wonders after
+        # clicking Add, and the answer is genuinely "nothing": the include-list
+        # is consulted on every `ls`, so open shells pick the change up at once.
+        self.status = QLabel("Changes take effect immediately — no shell reload.")
+        self.status.setWordWrap(True)
+        self.status.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(blurb)
+        layout.addWidget(self.list, 1)
+        layout.addLayout(buttons)
+        layout.addWidget(self.status)
+
+        self.reload()
+
+    def reload(self):
+        self.list.clear()
+        ok, out = run("list")
+        if not ok:
+            self.say(f"Could not read the include-list: {out}")
+            return
+        for path in (l for l in out.splitlines() if l.strip()):
+            item = QListWidgetItem(path)
+            item.setData(Qt.ItemDataRole.UserRole, path)
+            # A directory can be deleted or renamed long after being added, and
+            # a stale entry is invisible otherwise: `ls` simply never triggers
+            # there and the list looks correct.
+            if not os.path.isdir(path):
+                item.setText(f"{path}    (missing)")
+                item.setIcon(QIcon.fromTheme("dialog-warning"))
+                item.setForeground(Qt.GlobalColor.gray)
+            else:
+                item.setIcon(QIcon.fromTheme("folder"))
+            self.list.addItem(item)
+        self.sync_buttons()
+
+    def sync_buttons(self):
+        self.rm_btn.setEnabled(bool(self.list.selectedItems()))
+
+    def say(self, text):
+        self.status.setText(text)
+
+    def add(self):
+        path = QFileDialog.getExistingDirectory(
+            self, "Enable the grouped listing in…", start_dir()
+        )
+        if not path:
+            return
+        ok, out = run("add", path)
+        self.reload()
+        self.say(out or ("Added." if ok else "Failed."))
+
+    def remove(self):
+        paths = [
+            i.data(Qt.ItemDataRole.UserRole) for i in self.list.selectedItems()
+        ]
+        replies = []
+        for p in paths:
+            _, out = run("remove", p)
+            replies.append(out)
+        self.reload()
+        self.say("  ·  ".join(r for r in replies if r) or "Nothing removed.")
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("lsrecent")
+    app.setDesktopFileName("lsrecent")
+    if shutil.which(BINARY) is None:
+        QMessageBox.critical(
+            None,
+            "lsrecent not found",
+            f"The <b>{BINARY}</b> binary is not on PATH.\n\n"
+            "This window only drives it, so there is nothing to manage "
+            "without it. Install lsrecent, or check that ~/.local/bin is "
+            "on PATH.",
+        )
+        return 1
+    w = Window()
+    w.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

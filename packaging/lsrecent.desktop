@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=lsrecent Directories
+GenericName=Grouped ls settings
+Comment=Choose where plain ls shows the recency-grouped listing
+Exec=lsrecent-gui
+Icon=folder-recent
+Terminal=false
+Categories=Utility;
+Keywords=ls;shell;terminal;directory;recent;repositories;
+StartupNotify=true

@@ -29,13 +29,33 @@ The motivating use case: a `~/repos/github` directory with 250+ repositories fil
 
 ## Install
 
+### Debian package
+
 ```bash
 git clone https://github.com/danielrosehill/lsrecent.git
 cd lsrecent
+./build-deb.sh
+sudo apt install ./dist/lsrecent_*_all.deb
+lsrecent shell-install      # once per user account; see below
+```
+
+Installs `/usr/bin/lsrecent`, `/usr/bin/lsrecent-gui`, man pages and a launcher entry. `python3-pyqt6` is a Recommends rather than a Depends, so the package still installs on a headless box without dragging Qt in; on a desktop, apt pulls it by default.
+
+The package deliberately does not edit anyone's `~/.bashrc`. A root `postinst` has no business writing to user dotfiles and cannot know which accounts want the override, so `lsrecent shell-install` is a separate, per-user step — it appends the `eval` line, and does nothing if it is already there.
+
+### From the source tree, no root
+
+```bash
 ./install.sh
 ```
 
-That copies the `lsrecent` binary to `~/.local/bin` and adds one line to your `~/.bashrc`:
+Copies `lsrecent` and `lsrecent-gui` to `~/.local/bin`, adds a launcher entry under `~/.local/share/applications`, and runs `shell-install` for you.
+
+Pick one or the other. `~/.local/bin` usually precedes `/usr/bin` on `PATH`, so doing both leaves the from-source copy shadowing the package, and two installs that can drift is precisely the failure the [version handshake](#if-the-numbers-appear-but-nothing-asks-for-one) exists to catch.
+
+### Either way
+
+One line goes into your `~/.bashrc`:
 
 ```bash
 eval "$(lsrecent shell-init)"
@@ -43,7 +63,7 @@ eval "$(lsrecent shell-init)"
 
 Nothing else is sourced from the repo — after install, the binary is self-contained and the clone can be deleted.
 
-Requires bash 4.2+ and GNU coreutils (`stat -c`, `date -d`, `find -printf`, `realpath`) — i.e. any normal Linux. `fzf` is optional, needed only for the picker. On macOS, install coreutils and adjust the `stat`/`date`/`find` calls.
+Requires bash 4.2+ and GNU coreutils (`stat -c`, `date -d`, `find -printf`, `realpath`) — i.e. any normal Linux. `fzf` is optional, needed only for the picker; `python3-pyqt6` only for the window. On macOS, install coreutils and adjust the `stat`/`date`/`find` calls.
 
 ## Usage
 
@@ -341,7 +361,25 @@ The binary is its own backend. It manages an include-list and answers membership
 | `lsrecent remove /some/path` | Disable it for another directory |
 | `lsrecent list` | Print every directory with the override enabled |
 | `lsrecent edit` | Open the include-list in `$EDITOR` |
+| `lsrecent gui` | Manage the same list in a window |
 | `lsrecent check [dir]` | Exit 0/1 depending on whether the override is enabled (for scripting) |
+| `lsrecent shell-install` | Append the `eval` line to `~/.bashrc` (idempotent) |
+
+Changes take effect at once — the include-list is consulted on every `ls`, so there is nothing to reload in shells that are already open.
+
+### The window
+
+```bash
+lsrecent gui
+```
+
+Also in the application launcher as **lsrecent Directories**. A list of the opted-in directories, an *Add directory…* chooser, and *Remove* — that is the whole surface, because that is the whole of the mapping.
+
+![lsrecent-gui](docs/screenshot-gui.png)
+
+Two things it does that the CLI does not: entries whose directory has since been deleted or renamed are flagged `(missing)`, which is otherwise invisible — `ls` simply never triggers there and the include-list still looks right — and the status line quotes the binary's own reply, so *"already enabled for …"* reads the same in both places.
+
+It is a front end and nothing more: rows come from `lsrecent list`, changes go out through `lsrecent add` / `lsrecent remove`, and the list is re-read after each. The file format, tilde expansion, `realpath` resolution and deduplication stay in the binary, since a second implementation in another language is how the two come to disagree. It needs `python3-pyqt6`; the CLI does not.
 
 `shell-init` passes `COLUMNS` and `LINES` through explicitly — interactive bash
 sets both but exports neither, and without them the binary cannot size its columns

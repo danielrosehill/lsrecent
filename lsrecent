@@ -43,6 +43,8 @@
 #   lsrecent check [dir]     Exit 0 if dir has the override enabled (quiet;
 #                            used by the ls wrapper)
 #   lsrecent edit            Open the include-list in $EDITOR
+#   lsrecent gui             Same list in a window (needs the lsrecent-gui
+#                            companion; also in the app launcher)
 #
 # Visit log (what "opened" means):
 #   lsrecent visit [dir]     Record a visit to dir (the shell hook does this
@@ -61,7 +63,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.5.1"
+VERSION="1.6.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -193,7 +195,12 @@ cmd_add() {
 cmd_remove() {
     local d; d=$(resolve "$1") || d="${1:-$PWD}"
     if [[ -f "$config" ]] && grep -qxF "$d" "$config"; then
-        sed -i "\\#^${d}\$#d" "$config"
+        # grep -vxF, not sed: every sed address delimiter is a legal character in
+        # a directory name, so a path containing the delimiter would either fail
+        # to match or delete the wrong line. -F makes the whole path a literal.
+        local tmp; tmp=$(mktemp "${config}.XXXXXX")
+        grep -vxF "$d" "$config" > "$tmp" || true
+        mv "$tmp" "$config"
         echo "lsrecent: disabled for $d"
     else
         echo "lsrecent: was not enabled for $d"
@@ -860,6 +867,33 @@ cmd_pick() {
 # Shell integration
 # ---------------------------------------------------------------------------
 
+# Put the eval into ~/.bashrc, idempotently. Lives here rather than in install.sh
+# because the .deb has no install.sh to call: the package cannot do this itself
+# (a root postinst has no business editing user dotfiles, and does not know which
+# users want it), so the user runs this once per account.
+#
+# The search looks for the eval line itself in every file bash might source it
+# from, not for our own marker comment — someone who added the line by hand has
+# the integration installed, and a second eval is redundant clutter that has to
+# be found and removed by hand later.
+cmd_shell_install() {
+    local f
+    for f in ~/.bashrc ~/.bash_aliases ~/.bash_profile ~/.profile; do
+        [[ -f "$f" ]] || continue
+        if grep -q 'lsrecent shell-init' "$f" 2>/dev/null; then
+            echo "lsrecent: shell integration already present in $f"
+            return 0
+        fi
+    done
+    {
+        echo ""
+        echo "# lsrecent shell integration"
+        echo 'eval "$(lsrecent shell-init)"'
+    } >> ~/.bashrc
+    echo "lsrecent: added shell integration to ~/.bashrc"
+    echo "lsrecent: run \`source ~/.bashrc\` or open a new terminal"
+}
+
 cmd_shell_init() {
     # Exported, not just set: the binary is a child process, and this is how it
     # knows which vintage of the functions below is calling it. See
@@ -1004,6 +1038,12 @@ case "${1:-}" in
     pick)        shift; cmd_pick "$@" ;;
     path)        cmd_path "${2:-}" ;;
     shell-init)  cmd_shell_init ;;
+    shell-install) cmd_shell_install ;;
+    # exec, not a background launch: run from a terminal this is a foreground app
+    # like any other, and the desktop entry calls lsrecent-gui directly anyway.
+    gui)         command -v lsrecent-gui >/dev/null 2>&1 \
+                     || die "lsrecent-gui is not installed (needs python3-pyqt6)"
+                 shift; exec lsrecent-gui "$@" ;;
     # Reports the shell half as well as the binary, because "the numbers don't do
     # anything" is answered by comparing the two and nothing else can show them.
     -v|--version|version)
