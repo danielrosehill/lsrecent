@@ -8,9 +8,12 @@ Instead of one undifferentiated wall of names, entries are bucketed under conspi
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  (bright green)
 Laptop-Configs  Incoterms_Poster
 
+━━ YESTERDAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  (green)
+mqtt-mcp   palgate-multigate
+
 ━━ PAST WEEK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  (cyan)
 Hardware-Purchase-0726   thinkpad-e15-upgrades   android-unroot
-Wheres-My-Stuff-Deploy   palgate-multigate       mqtt-mcp
+Wheres-My-Stuff-Deploy   Israel-Cable-Sourcing   Hebrew-Tech-Vocab
 
 ━━ PAST MONTH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  (yellow)
 My-Weird-Prompts   UniFi-OS-Server-Migration   laptop-nvme-upgrade
@@ -22,7 +25,7 @@ My-Weird-Prompts   UniFi-OS-Server-Migration   laptop-nvme-upgrade
 ...
 ```
 
-The motivating use case: a `~/repos/github` directory with 250+ repositories filed under topic folders, where "what was I working on recently?" matters far more than alphabetical order. There, entries are numbered in recency order and a bare number `cd`s into the repo — see [Jumping by number](#jumping-by-number).
+The motivating use case: a `~/repos/github` directory with 250+ repositories filed under topic folders, where "what was I working on recently?" matters far more than alphabetical order. There, entries are numbered in recency order and the listing ends by asking which one you want — type the number and you are in it. See [Choosing an entry](#choosing-an-entry).
 
 ## Install
 
@@ -45,19 +48,27 @@ Requires bash 4.2+ and GNU coreutils (`stat -c`, `date -d`, `find -printf`, `rea
 ## Usage
 
 ```bash
-lsrecent [dir]        # grouped view of dir (default: current directory)
-lsr [dir]             # short alias for the same
+ls                    # grouped view, in directories you have opted in
+lsr [dir]             # grouped view of dir (default: current directory)
 
-lsrecent repos [root] # grouped view at repository level, across the whole tree
-lsrecent today [root] # only the repos you opened today
-lsrp                  # fzf picker over every repo, then cd into it
-lsrt                  # same, restricted to today's
-
-lsreg [args]          # plain ls, even where the grouped view is the default
-<number>              # cd into that entry of the last listing
-
+lsrepos               # grouped view at repository level, across the whole tree
+lstoday               # only the repos you opened today
+lsyesterday           # only the repos whose last visit was yesterday
 lsrepos --all         # the whole listing, past one screenful (-a works too)
+
+lsrp                  # fzf picker over every repo, then cd into it
+lsrt / lsry           # same, restricted to today's / yesterday's
+lsreg [args]          # plain ls, even where the grouped view is the default
 ```
+
+Every repository listing ends with a prompt — type a number, press enter, and you
+are in that repo. See [Choosing an entry](#choosing-an-entry).
+
+Those are the shell functions `shell-init` defines, and they are what you want
+interactively, because only a function running in your shell can `cd` it. Each
+wraps the corresponding subcommand of the binary — `lsrecent`, `lsrecent repos`,
+`lsrecent today`, `lsrecent yesterday`, `lsrecent pick` — which are what to call
+from scripts: they list, and print, but never prompt.
 
 ## Repository level
 
@@ -91,20 +102,61 @@ defaults to `$LSRECENT_REPO_ROOT`, else `~/repos/github`, else `~/repos`; search
 depth is `$LSRECENT_REPO_DEPTH` (4). Names are shown as bare basenames because
 they are normally unique; `--full` shows `topic/repo` instead.
 
-## Jumping by number
+## Choosing an entry
 
 Repository listings are numbered in recency order across the whole listing — `1`
-is the most recently touched repo, and the count keeps running through *PAST
-WEEK*, *PAST MONTH* and the rest rather than restarting per bucket. Type a number,
-press enter, and you are in that repo:
+is the most recently touched repo, and the count keeps running through *YESTERDAY*,
+*PAST WEEK* and the rest rather than restarting per bucket.
+
+**A listing is a question, so it ends by asking it.** Type a number, press enter,
+and the program has done its job — you are standing where you wanted to be:
 
 ```
 $ ls
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   1 lsrecent            2 HVAC_Repair_0726     3 Driving-Checklists
-$ 2
+→ number to cd, enter to stay: 2
+/home/you/repos/github/home-and-property/HVAC_Repair_0726
 $ pwd
 /home/you/repos/github/home-and-property/HVAC_Repair_0726
+```
+
+Enter on its own — or `q`, or ctrl-d — stays put. A number that was not in the
+listing, or a repo deleted since it was printed, re-asks rather than failing.
+`LSRECENT_PROMPT=0` turns the prompt off and gives you the listing alone.
+
+The prompt appears only where something can act on the answer: a listing on a
+terminal, run through the shell integration. Piped, redirected, or with the binary
+called directly, it lists and exits, so `lsrecent repos | wc -l` and scripts behave
+exactly as before.
+
+### Why the answer travels through a file
+
+A process cannot `cd` its parent shell — the working directory is per-process, and
+a child changing its own is lost when it exits. So the work is split: the binary
+prints the listing and reads the reply from `/dev/tty`, then writes the chosen
+absolute path to the file named in `$LSRECENT_CD_FILE`; the shell function that set
+that variable reads the file and does the `cd` itself, in your shell.
+
+Three separate channels, deliberately. Stdout is the listing and may be a pipe;
+stdin may be anything at all; so the prompt gets `/dev/tty` and the answer gets a
+file of its own. The file is named for the shell's PID (`…/lsrecent/cd.$$`) so two
+terminals listing at once cannot read each other's answer, and it is a fixed name
+rather than `mktemp` to keep the bare-`ls` path fork-free. It is removed as soon as
+it is read; `lsrecent prune` sweeps any left by a shell that died mid-prompt.
+
+### The numbers also stay bound
+
+After the prompt is gone the numbers still work, for the case where you glance at a
+listing, do something else, and then decide:
+
+```
+$ lstoday
+━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1 lsrecent   2 HVAC_Repair_0726
+→ number to cd, enter to stay:
+$ git -C ~/notes pull
+$ 2                       # still goes where 2 pointed
 ```
 
 Each listing writes its numbering to
@@ -118,8 +170,8 @@ somewhere wrong.
 The obvious-looking alternative, `command_not_found_handle`, cannot work:
 bash runs that handler in a forked subshell, so any `cd` it performs dies with the
 fork. Numbers are only bound by listings run through the shell integration (bare
-`ls`, `lsrepos`, `lstoday`); `lsrecent repos` invoked directly still writes the
-map, but a subprocess cannot define functions in your shell.
+`ls`, `lsrepos`, `lstoday`, `lsyesterday`); `lsrecent repos` invoked directly still
+writes the map, but a subprocess cannot define functions in your shell.
 
 ## One screenful by default
 
@@ -178,7 +230,7 @@ case where you want the *no-argument* listing unmodified.
 
 ## "Opened today" and the visit log
 
-`repos` and `today` mean different things by recency, deliberately.
+`repos` and `today` / `yesterday` mean different things by recency, deliberately.
 
 **`repos` uses activity**: the newest of the repo directory's mtime, `.git`'s
 mtime, and any recorded visit. `.git` is included because commits, checkouts and
@@ -204,13 +256,40 @@ does the same thing as a subprocess, for non-bash shells.
 **It only records from the moment it is installed.** A fresh install has an
 empty log, and `today` will say so rather than silently showing nothing.
 
+### Today and yesterday do not overlap
+
+`lsyesterday` is `lstoday` for the previous calendar day, and the two lists are
+disjoint: **a repo you opened yesterday and again today is today's, and appears in
+no other list.** Every repo has exactly one timestamp — its *newest* visit — and
+that timestamp falls in exactly one day. So the question the pair answers is "when
+did I last have this open?", and each repo answers it once. If it were "was this
+open at any point yesterday?", most of yesterday's list would be a duplicate of
+today's, which is precisely the noise these views exist to remove.
+
+The same logic makes *YESTERDAY* a bucket of its own in the ordinary `lsrepos`
+listing, rather than being folded into *PAST WEEK* — "today or yesterday?" is the
+distinction you actually reach for, and one timestamp per repo means the buckets
+stay mutually exclusive.
+
+Day boundaries are local midnights, computed with bash's own `printf '%(%H)T'`
+rather than by forking `date`, since bare `ls` goes through this path. Yesterday's
+midnight is *snapped to* rather than reached by subtracting 86400, so a day that a
+DST change made 23 or 25 hours long still gives the right boundary — verified
+against every day of 2026 in eight zones, including 30-minute DST (Lord Howe) and
+the southern hemisphere. Zones that transition *at* midnight, such as
+America/Santiago, land within the hour twice a year; nothing here cares.
+
 ## The picker
 
 `lsrp` lists every repo newest-first in `fzf` and `cd`s into what you choose;
-`lsrt` restricts the list to today's. The preview pane shows the last 8 commits
-and `git status -sb`. Both are shell functions from `shell-init`, because `cd`
-has to happen in your shell — `lsrecent pick` itself just prints the chosen
-absolute path, so it composes with anything else.
+`lsrt` restricts the list to today's and `lsry` to yesterday's. The preview pane
+shows the last 8 commits and `git status -sb`. All three are shell functions from
+`shell-init`, because `cd` has to happen in your shell — `lsrecent pick` itself
+just prints the chosen absolute path, so it composes with anything else.
+
+The picker is for searching by name when you know what you are after. The numbered
+prompt is for the far commoner case of picking off a short recency-ordered list, and
+needs no dependency and no fuzzy-matching in your head.
 
 `fzf` is the tool's only optional dependency — the picker needs it, everything
 else works without it.
@@ -238,9 +317,11 @@ sets both but exports neither, and without them the binary cannot size its colum
 or its row budget without forking `tput`.
 
 `shell-init` also defines the `lsr-add`, `lsr-remove` and `lsr-edit` aliases,
-`lsreg`, the `lsrp` / `lsrt` picker functions, and `lsrepos` / `lstoday`. The last
-two are functions rather than aliases because they have to bind the numbers they
-printed in your shell afterwards.
+`lsreg`, the `lsrp` / `lsrt` / `lsry` picker functions, and `lsrepos` / `lstoday` /
+`lsyesterday`. Those last three, and the `ls` wrapper, all go through one
+`__lsrecent_list` helper: they have to `cd` to wherever the prompt was answered and
+bind the numbers they printed, and both of those must happen in your shell, which
+rules out aliases.
 
 `add` validates that the path exists, resolves it with `realpath` (so relative paths and symlinks work), and deduplicates. Changes take effect immediately in every open shell — the list is consulted on each `ls`, so there is nothing to reload.
 
@@ -264,7 +345,7 @@ Plain text rather than JSON because a pure-bash tool shouldn't need `jq` or Pyth
 ```bash
 ls() {
     if (( $# == 0 )) && [[ -t 1 ]] && lsrecent check 2>/dev/null; then
-        lsrecent && __lsrecent_bind_numbers
+        __lsrecent_list          # lists, prompts, cds where you said
     else
         command ls --color=auto "$@"
     fi
@@ -281,7 +362,8 @@ Because the wrapper's logic lives in the binary (`shell-init`, `check`), updatin
 
 ## Design notes
 
-- **Buckets:** *Today* is calendar-today (not "last 24 h"), then ≤ 7 days, ≤ 30 days, ≤ 90 days, older. Empty buckets are omitted. Membership is decided by comparing against today's local midnight epoch, not by formatting each timestamp.
+- **Buckets:** *Today* and *Yesterday* are calendar days (not "last 24 h" / "24–48 h ago"), then ≤ 7 days, ≤ 30 days, ≤ 90 days, older. Empty buckets are omitted. Membership is decided by comparing against local midnight epochs, not by formatting each timestamp. One timestamp per entry means the buckets are mutually exclusive, which is what lets *Today* and *Yesterday* be answers rather than overlapping windows.
+- **A listing is a question.** Anything that numbers its output should be willing to take a number back, so the prompt is the default rather than a flag: the alternative is a tool that shows you the answer and then makes you retype part of it. The non-interactive path still exists for pipes and scripts, where it is the only sensible behaviour — and it is chosen by detecting that situation, not by asking the user to declare it.
 - **Forks are the entire performance story.** A fork costs ~7 ms here, and everything else this tool does is free by comparison. So there is exactly one rule: *no subprocess inside a per-entry loop.* Timestamps come from a single `find -printf`, not a `stat` per entry; the clock comes from bash's `printf '%(%s)T'`, not `date`; `check` compares the raw `$PWD` before paying for `realpath`; `COLUMNS` is passed in by the shell wrapper so the binary never forks `tput`. Measured on a 3000-entry directory: **27.9 s before, 0.15 s after.** The old code was linear in fork count, so it was fine on a 30-entry directory and unusable on a large one — if a change here makes a big directory feel slow again, count the forks first.
 - **Recency source is mtime, except where it can't be.** Access time (atime) would literally mean "last opened", but on modern Linux `relatime`/`noatime` mounts make it unreliable, and merely listing or backing up a tree can touch it. Modification time is stable and, for project directories, tracks real activity — but it cannot express "I opened this", which is why repo-level views also consult the visit log.
 - **Ordering within a bucket** is most-recent-first.

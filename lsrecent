@@ -8,14 +8,21 @@
 #                            repositories; a repo is listed by its children.
 #   lsrecent repos [root]    Grouped listing of every git repo under root,
 #                            shown at repo level (topic/repo), newest first
-#   lsrecent today [root]    Only the repos touched today
+#   lsrecent today [root]    Only the repos opened today
+#   lsrecent yesterday [root]
+#                            Only the repos whose last visit was yesterday. One
+#                            opened today as well belongs to today, not here.
 #   lsrecent pick [root]     fzf picker over repos; prints the chosen path
-#                            (use the `lsrp` / `lsrt` shell functions to cd)
+#                            (use the `lsrp` / `lsrt` / `lsry` functions to cd)
 #
-# Jumping by number. Repo listings are numbered in recency order — 1 is the most
-# recently touched — and the shell integration binds those numbers, so typing a
-# number and pressing enter cds into it. `lsrecent path N` resolves a number to
-# its path (what the shell functions call).
+# Choosing an entry. Repo listings are numbered in recency order — 1 is the most
+# recently touched — and end with a prompt: type a number, press enter, and you
+# are in that repo. Enter on its own (or q, or ctrl-d) stays put. Because a
+# process cannot cd its parent shell, the chosen path is written to
+# $LSRECENT_CD_FILE and the shell function that set it does the cd; the numbers
+# are also bound as shell functions, so they keep working after the prompt is
+# gone. LSRECENT_PROMPT=0 suppresses the prompt (listing only, as before), and
+# `lsrecent path N` resolves a number to its path.
 #
 # Repo listings stop at one screenful, oldest cut first, and say how many they
 # elided. `--all` (`-a`) prints everything; $LSRECENT_MAX_ROWS overrides the row
@@ -46,7 +53,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -93,6 +100,65 @@ midnight_epoch() {
     printf -v m '%(%M)T' -1
     printf -v s '%(%S)T' -1
     printf '%s' "$(( now - (10#$h * 3600 + 10#$m * 60 + 10#$s) ))"
+}
+
+# Snap a timestamp to the nearest local midnight, using bash's own printf for the
+# calendar arithmetic so that no `date` is forked.
+#
+# It iterates because one pass is not enough across a DST change: subtracting the
+# wall-clock seconds since midnight assumes the offset has not moved in between, so
+# on the day after a transition it lands an hour off — 23:00 the previous evening,
+# or 01:00 the same morning. From there the residual points at the real midnight,
+# and the second pass reaches it. Snapping to the *nearest* midnight rather than
+# always downwards is what makes that converge instead of walking backwards a day
+# at a time. Three passes is slack; every real zone settles in two.
+#
+# Verified exact on all 365 day boundaries of 2026 in Asia/Jerusalem, New_York,
+# Sydney, Lord_Howe (30-minute DST), Chatham, Dublin, Kolkata and UTC. The one
+# family it cannot be exact for is zones that transition *at* midnight, such as
+# America/Santiago, where local midnight either does not exist or happens twice; it
+# lands within the hour, which is well inside what recency bucketing cares about.
+snap_midnight() {
+    local t=$1 h m s secs i
+    for i in 1 2 3; do
+        printf -v h '%(%H)T' "$t"
+        printf -v m '%(%M)T' "$t"
+        printf -v s '%(%S)T' "$t"
+        secs=$(( 10#$h * 3600 + 10#$m * 60 + 10#$s ))
+        (( secs == 0 )) && break
+        if (( secs > 43200 )); then t=$(( t + 86400 - secs )); else t=$(( t - secs )); fi
+    done
+    printf '%s' "$t"
+}
+
+# Epoch of yesterday's local midnight, given today's. Snapped from a moment in the
+# middle of yesterday rather than reached by subtracting 86400, so a day that a DST
+# change made 23 or 25 hours long still yields the right boundary.
+yesterday_midnight_epoch() {
+    snap_midnight "$(( $1 - 43200 ))"
+}
+
+# The recency window a listing is restricted to: "" (everything), today, or
+# yesterday. Both named windows read the visit log only, and both bucket a repo by
+# its *newest* visit — which is what makes them disjoint: something opened
+# yesterday and again today is today's, and appears in no other list.
+window=""
+win_lo=0    # inclusive lower bound
+win_hi=0    # exclusive upper bound; 0 = none
+
+set_window() {
+    window=$1
+    local mid; mid=$(midnight_epoch)
+    case "$window" in
+        today)     win_lo=$mid; win_hi=0 ;;
+        yesterday) win_hi=$mid; win_lo=$(yesterday_midnight_epoch "$mid") ;;
+        *)         win_lo=0;    win_hi=0 ;;
+    esac
+}
+
+in_window() {
+    (( $1 >= win_lo )) || return 1
+    (( win_hi == 0 || $1 < win_hi ))
 }
 
 die() {
@@ -197,6 +263,12 @@ cmd_prune() {
         printf '%s\t%s\n' "${keep[$p]}" "$p"
     done | sort -n > "$tmp"
     mv -f "$tmp" "$visit_log"
+
+    # Reply files from shells that died between the prompt and the cd. Harmless —
+    # a PID is reused only after the file has been removed by the next listing in
+    # that shell — but there is no reason to keep them.
+    find "$state_dir" -maxdepth 1 -name 'cd.*' -mtime +1 -delete 2>/dev/null
+    return 0
 }
 
 declare -A opened_ts=()
@@ -278,7 +350,8 @@ has_nested_repo() {
 
 # Emits "<epoch>\t<path relative to root>", newest first. With opened_only set,
 # only repos with a recorded visit are emitted, timestamped by that visit —
-# "when did I open this", with mtime ignored entirely.
+# "when did I open this", with mtime ignored entirely. That is one timestamp per
+# repo, the newest, which is what keeps the today and yesterday windows disjoint.
 sorted_repos() {
     local root=$1 opened_only=${2:-0} p
     for p in "${!repo_ts[@]}"; do
@@ -396,6 +469,50 @@ write_sel_map() {
     return 0
 }
 
+# Ask which entry to cd into, straight after printing the listing. Interactive is
+# the default because a numbered listing is a question, and the numbers are only
+# useful while they are still on the screen above the cursor.
+#
+# The prompt talks to /dev/tty, not stdin/stdout: stdin may be anything, and
+# stdout is the listing itself (possibly a pipe). The answer leaves by a third
+# channel again — the file named in $LSRECENT_CD_FILE — because a process cannot
+# cd its parent shell; the shell function that set the variable does that. With
+# the variable unset there is nobody to act on a choice, so no prompt is shown:
+# `lsrecent repos` run directly still just lists.
+prompt_jump() {
+    local dest=${LSRECENT_CD_FILE:-}
+    [[ -n "$dest" ]] || return 0
+    (( stdout_tty )) || return 0
+    [[ "${LSRECENT_PROMPT:-1}" != 0 ]] || return 0
+    (( ${#sel_paths[@]} )) || return 0
+    [[ -r /dev/tty && -w /dev/tty ]] || return 0
+
+    local reply d
+    while :; do
+        printf '\e[90m→ number to cd, enter to stay: \e[0m' > /dev/tty
+        # A bare `read` with no reply (EOF from ctrl-d) leaves the cursor mid-line.
+        IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
+        case "$reply" in
+            ''|q|Q) return 0 ;;
+        esac
+        if [[ ! "$reply" =~ ^[0-9]+$ ]] || [[ -z ${sel_paths[10#$reply]:-} ]]; then
+            printf '\e[90mno entry %s — a number from the listing, or enter to stay\e[0m\n' \
+                "$reply" > /dev/tty
+            continue
+        fi
+        d=${sel_paths[10#$reply]}
+        if [[ ! -d "$d" ]]; then
+            printf '\e[90mgone since the listing: %s\e[0m\n' "$d" > /dev/tty
+            continue
+        fi
+        # Echoed so the destination survives in the scrollback: the prompt line
+        # that follows shows the new directory, but this says which number it was.
+        printf '\e[90m%s\e[0m\n' "$d" > /dev/tty
+        printf '%s\n' "$d" > "$dest" 2>/dev/null
+        return 0
+    done
+}
+
 # Resolve a number from the last listing to its path.
 cmd_path() {
     local want=$1
@@ -496,17 +613,19 @@ cmd_show() {
 # ---------------------------------------------------------------------------
 
 cmd_repos() {
-    local today_only=0 full=0 no_limit=0 root=""
+    local want_window="" full=0 no_limit=0 root=""
     while (( $# )); do
         case "$1" in
-            --today)   today_only=1 ;;
-            --full)    full=1 ;;
-            --all|-a)  no_limit=1 ;;
-            -*)        die "unknown option: $1" ;;
-            *)         root=$1 ;;
+            --today)     want_window=today ;;
+            --yesterday) want_window=yesterday ;;
+            --full)      full=1 ;;
+            --all|-a)    no_limit=1 ;;
+            -*)          die "unknown option: $1" ;;
+            *)           root=$1 ;;
         esac
         shift
     done
+    set_window "$want_window"
     [[ -n "$root" ]] || root=$(default_root)
     root=$(resolve "$root") || die "no such directory: $root"
     [[ -d "$root" ]] || die "not a directory: $root"
@@ -515,33 +634,40 @@ cmd_repos() {
     collect_repos "$root" || die "no git repositories under $root"
 
     local cols; cols=$(term_cols)
-    local now midnight
+    local now midnight y_midnight
     now=$(now_epoch)
     midnight=$(midnight_epoch)
+    y_midnight=$(yesterday_midnight_epoch "$midnight")
 
     # Entries are "display<TAB>abspath": the display name drops the topic folder
     # unless --full, but the number has to resolve to a real path, and sorted_repos
     # yields paths relative to root.
-    local g_today=() g_week=() g_month=() g_quarter=() g_older=()
+    local g_today=() g_yest=() g_week=() g_month=() g_quarter=() g_older=()
     local ts rel name entry age_days
+    local opened_only=0; [[ -n "$window" ]] && opened_only=1
     while IFS=$'\t' read -r ts rel; do
         [[ -n "$rel" ]] || continue
+        in_window "$ts" || continue
         if (( full )); then name=$rel; else name=${rel##*/}; fi
         entry="$name"$'\t'"$root/$rel"
-        if (( ts >= midnight )); then
-            g_today+=("$entry")
-            continue
+        # YESTERDAY is its own bucket in the unrestricted listing too, not folded
+        # into PAST WEEK: "was that today or yesterday?" is the question actually
+        # being asked, and a repo has one newest timestamp, so it lands in exactly
+        # one of them. With a window set every entry falls in a single bucket
+        # anyway, and the group loop below prints just that one.
+        if   (( ts >= midnight ));   then g_today+=("$entry")
+        elif (( ts >= y_midnight )); then g_yest+=("$entry")
+        else
+            age_days=$(( (now - ts) / 86400 ))
+            if   (( age_days <= 7 ));  then g_week+=("$entry")
+            elif (( age_days <= 30 )); then g_month+=("$entry")
+            elif (( age_days <= 90 )); then g_quarter+=("$entry")
+            else                            g_older+=("$entry")
+            fi
         fi
-        (( today_only )) && continue
-        age_days=$(( (now - ts) / 86400 ))
-        if   (( age_days <= 7 ));  then g_week+=("$entry")
-        elif (( age_days <= 30 )); then g_month+=("$entry")
-        elif (( age_days <= 90 )); then g_quarter+=("$entry")
-        else                            g_older+=("$entry")
-        fi
-    done < <(sorted_repos "$root" "$today_only")
+    done < <(sorted_repos "$root" "$opened_only")
 
-    sel_total=$(( ${#g_today[@]} + ${#g_week[@]} + ${#g_month[@]} \
+    sel_total=$(( ${#g_today[@]} + ${#g_yest[@]} + ${#g_week[@]} + ${#g_month[@]} \
                   + ${#g_quarter[@]} + ${#g_older[@]} ))
 
     # Print oldest-group-last, stopping when the screen is full. Because both the
@@ -549,9 +675,9 @@ cmd_repos() {
     # exactly the least interesting repos — so a truncated listing is still the
     # right answer to "what was I working on recently?", and the numbering only
     # ever covers what is actually on screen.
-    local -a group_labels=("TODAY" "PAST WEEK" "PAST MONTH" "PAST 3 MONTHS" "OLDER")
-    local -a group_colors=(92 96 93 95 90)
-    local -a group_vars=(g_today g_week g_month g_quarter g_older)
+    local -a group_labels=("TODAY" "YESTERDAY" "PAST WEEK" "PAST MONTH" "PAST 3 MONTHS" "OLDER")
+    local -a group_colors=(92 32 96 93 95 90)
+    local -a group_vars=(g_today g_yest g_week g_month g_quarter g_older)
 
     local budget=0
     (( no_limit )) || budget=$(row_budget)
@@ -608,15 +734,19 @@ cmd_repos() {
     if (( shown )); then
         if (( hidden )); then
             local hint="lsrepos"
-            (( today_only )) && hint="lstoday"
+            case "$window" in
+                today)     hint="lstoday" ;;
+                yesterday) hint="lsyesterday" ;;
+            esac
             printf '\e[90m… %d more · %s --all\e[0m\n' "$hidden" "$hint"
         fi
         write_sel_map
+        prompt_jump
         return 0
     fi
 
-    if (( today_only )); then
-        printf '\e[90mNo repos opened today under %s\e[0m\n' "$root"
+    if [[ -n "$window" ]]; then
+        printf '\e[90mNo repos opened %s under %s\e[0m\n' "$window" "$root"
         [[ -s "$visit_log" ]] || printf '\e[90mThe visit log is empty — it starts filling once the shell hook is loaded (open a new shell).\e[0m\n'
     else
         echo "(no repositories found under $root)"
@@ -628,15 +758,17 @@ cmd_repos() {
 # ---------------------------------------------------------------------------
 
 cmd_pick() {
-    local today_only=0 root=""
+    local want_window="" root=""
     while (( $# )); do
         case "$1" in
-            --today) today_only=1 ;;
-            -*)      die "unknown option: $1" ;;
-            *)       root=$1 ;;
+            --today)     want_window=today ;;
+            --yesterday) want_window=yesterday ;;
+            -*)          die "unknown option: $1" ;;
+            *)           root=$1 ;;
         esac
         shift
     done
+    set_window "$want_window"
     command -v fzf >/dev/null || die "pick requires fzf"
     [[ -n "$root" ]] || root=$(default_root)
     root=$(resolve "$root") || die "no such directory: $root"
@@ -644,17 +776,17 @@ cmd_pick() {
     load_visits
     collect_repos "$root" || die "no git repositories under $root"
 
-    local midnight; midnight=$(midnight_epoch)
+    local opened_only=0; [[ -n "$window" ]] && opened_only=1
     local names=() ts name
     while IFS=$'\t' read -r ts name; do
-        (( today_only && ts < midnight )) && continue
+        in_window "$ts" || continue
         names+=("$name")
-    done < <(sorted_repos "$root" "$today_only")
+    done < <(sorted_repos "$root" "$opened_only")
 
     (( ${#names[@]} )) || die "nothing to pick"
 
     local prompt="repo> "
-    (( today_only )) && prompt="today> "
+    [[ -n "$window" ]] && prompt="$window> "
 
     local preview='p='"$(printf '%q' "$root")"'/{}
         git -C "$p" -c color.ui=always log --oneline -8 2>/dev/null
@@ -688,11 +820,12 @@ lsreg() {
     command ls --color=auto "$@"
 }
 
-# Typing a number and pressing enter cds into that entry. The numbers have to be
-# real shell functions defined in *this* shell: `command_not_found_handle` is run
-# in a forked subshell, so a cd from there is lost when it exits. That in turn is
-# why the grouped views are functions rather than aliases — they rebind after
-# printing, so the numbers on screen are always the current ones.
+# Typing a number at the *later* prompt — after the listing's own prompt has been
+# answered or dismissed — cds into that entry too. The numbers have to be real
+# shell functions defined in *this* shell: `command_not_found_handle` is run in a
+# forked subshell, so a cd from there is lost when it exits. That in turn is why
+# the grouped views are functions rather than aliases — they rebind after printing,
+# so the numbers on screen are always the current ones.
 __lsrecent_bound=()
 __lsrecent_bind_numbers() {
     local n
@@ -716,34 +849,52 @@ __lsrecent_jump() {
     [[ -n $d ]] && cd "$d"
 }
 
-# COLUMNS and LINES are set by interactive bash but not exported, so pass them
-# through explicitly — otherwise the binary has to fork `tput` to size the
-# listing and its row budget.
-lsrepos() {
-    COLUMNS="${COLUMNS:-}" LINES="${LINES:-}" lsrecent repos "$@" \
-        && __lsrecent_bind_numbers
+# Every listing goes through here, so every listing is interactive: the binary
+# prints, prompts, and writes the chosen path to $LSRECENT_CD_FILE, and this
+# function — running in your shell, unlike the binary — does the cd.
+#
+# COLUMNS and LINES are set by interactive bash but not exported, so they are
+# passed through explicitly; otherwise the binary has to fork `tput` to size the
+# listing and its row budget. The reply file is named after this shell's PID, so
+# two terminals listing at the same time cannot read each other's answer, and it
+# is a fixed name rather than `mktemp` so the hot path stays fork-free.
+__lsrecent_list() {
+    local f="$__lsrecent_state/cd.$$" rc d
+    rm -f "$f" 2>/dev/null
+    COLUMNS="${COLUMNS:-}" LINES="${LINES:-}" LSRECENT_CD_FILE="$f" lsrecent "$@"
+    rc=$?
+    (( rc == 0 )) && __lsrecent_bind_numbers
+    if [[ -s $f ]]; then
+        d=$(<"$f")
+        rm -f "$f" 2>/dev/null
+        [[ -d $d ]] && cd "$d"
+    fi
+    return $rc
 }
-lstoday() {
-    COLUMNS="${COLUMNS:-}" LINES="${LINES:-}" lsrecent today "$@" \
-        && __lsrecent_bind_numbers
-}
+
+lsrepos()     { __lsrecent_list repos "$@"; }
+lstoday()     { __lsrecent_list today "$@"; }
+lsyesterday() { __lsrecent_list yesterday "$@"; }
 
 ls() {
     if (( $# == 0 )) && [[ -t 1 ]] && lsrecent check 2>/dev/null; then
-        COLUMNS="${COLUMNS:-}" LINES="${LINES:-}" lsrecent \
-            && __lsrecent_bind_numbers
+        __lsrecent_list
     else
         command ls --color=auto "$@"
     fi
 }
 
-# Pick a repo and cd into it. `lsrp` = all repos, `lsrt` = today's only.
+# Pick a repo and cd into it. `lsrp` = all repos, `lsrt` = today's, `lsry` =
+# yesterday's.
 lsrp() {
     local d
     d=$(lsrecent pick "$@") && [[ -n "$d" ]] && cd "$d"
 }
 lsrt() {
     lsrp --today "$@"
+}
+lsry() {
+    lsrp --yesterday "$@"
 }
 
 # Visit logging. Deliberately inline rather than a call into the binary: this
@@ -789,12 +940,16 @@ case "${1:-}" in
     prune)       load_visits; cmd_prune ;;
     repos)       shift; cmd_repos "$@" ;;
     today)       shift; cmd_repos --today "$@" ;;
+    yesterday|yest) shift; cmd_repos --yesterday "$@" ;;
     pick)        shift; cmd_pick "$@" ;;
     path)        cmd_path "${2:-}" ;;
     shell-init)  cmd_shell_init ;;
     -v|--version|version) echo "lsrecent $VERSION" ;;
     -h|--help|help)
-        sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'
+        # The header comment block, minus the shebang, is the help text. Bounded by
+        # the first line that is not a comment rather than a fixed line range, so
+        # editing the header cannot silently truncate --help.
+        awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "$0"
         ;;
     *)           cmd_show "${1:-}" ;;
 esac
