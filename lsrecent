@@ -24,6 +24,12 @@
 # gone. LSRECENT_PROMPT=0 suppresses the prompt (listing only, as before), and
 # `lsrecent path N` resolves a number to its path.
 #
+# The prompt needs the shell half of the pair to be current: shell-init exports
+# LSRECENT_SHELL with its version, and a listing that finds it missing or older
+# than this binary says so instead of prompting. A shell that was open across an
+# upgrade is still running the functions it eval'd at startup — `source ~/.bashrc`
+# replaces them. `lsrecent --version` reports both halves.
+#
 # Repo listings stop at one screenful, oldest cut first, and say how many they
 # elided — but the elided repos are numbered too, and the footer gives their
 # range, so a number past the fold still cds. `--all` (`-a`) prints everything;
@@ -55,7 +61,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.5.0"
+VERSION="1.5.1"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -488,6 +494,25 @@ write_sel_map() {
     return 0
 }
 
+# Said instead of prompting when the listing cannot be answered. A missing prompt
+# is the one failure this tool can have that looks like no failure at all — the
+# numbers print, nothing asks for one, and nothing on screen explains why — and
+# its usual cause is a shell still running functions it eval'd before the binary
+# was upgraded underneath it, sometimes days before. Hence the version handshake:
+# shell-init exports the version that defined the functions, and a shell that
+# exported nothing predates the handshake, so is stale by definition.
+stale_integration_notice() {
+    local loaded=${LSRECENT_SHELL:-} why
+    [[ "$loaded" != "$VERSION" ]] || return 0
+    if [[ -n "$loaded" ]]; then
+        why="shell has $loaded, binary is $VERSION"
+    else
+        why="not loaded in this shell"
+    fi
+    printf '\e[90m→ cd-by-number needs the shell integration reloaded (%s) — `source ~/.bashrc`, or open a new terminal\e[0m\n' \
+        "$why"
+}
+
 # Ask which entry to cd into, straight after printing the listing. Interactive is
 # the default because a numbered listing is a question, and the numbers are only
 # useful while they are still on the screen above the cursor.
@@ -496,14 +521,16 @@ write_sel_map() {
 # stdout is the listing itself (possibly a pipe). The answer leaves by a third
 # channel again — the file named in $LSRECENT_CD_FILE — because a process cannot
 # cd its parent shell; the shell function that set the variable does that. With
-# the variable unset there is nobody to act on a choice, so no prompt is shown:
-# `lsrecent repos` run directly still just lists.
+# the variable unset there is nobody to act on a choice, so the notice above
+# stands in for the prompt rather than a question nothing could honour: that
+# covers both a stale shell and `lsrecent repos` run straight from argv, where
+# typing a number would not work either.
 prompt_jump() {
     local dest=${LSRECENT_CD_FILE:-}
-    [[ -n "$dest" ]] || return 0
     (( stdout_tty )) || return 0
     [[ "${LSRECENT_PROMPT:-1}" != 0 ]] || return 0
     (( ${#sel_paths[@]} )) || return 0
+    [[ -n "$dest" ]] || { stale_integration_notice; return 0; }
     [[ -r /dev/tty && -w /dev/tty ]] || return 0
 
     local reply d
@@ -834,6 +861,10 @@ cmd_pick() {
 # ---------------------------------------------------------------------------
 
 cmd_shell_init() {
+    # Exported, not just set: the binary is a child process, and this is how it
+    # knows which vintage of the functions below is calling it. See
+    # stale_integration_notice.
+    printf 'export LSRECENT_SHELL=%s\n' "$VERSION"
     cat <<'EOF'
 alias lsr='lsrecent'
 alias lsr-add='lsrecent add'
@@ -973,7 +1004,15 @@ case "${1:-}" in
     pick)        shift; cmd_pick "$@" ;;
     path)        cmd_path "${2:-}" ;;
     shell-init)  cmd_shell_init ;;
-    -v|--version|version) echo "lsrecent $VERSION" ;;
+    # Reports the shell half as well as the binary, because "the numbers don't do
+    # anything" is answered by comparing the two and nothing else can show them.
+    -v|--version|version)
+        case "${LSRECENT_SHELL:-}" in
+            "$VERSION") echo "lsrecent $VERSION (shell integration: loaded)" ;;
+            '')         echo "lsrecent $VERSION (shell integration: not loaded in this shell)" ;;
+            *)          echo "lsrecent $VERSION (shell integration: $LSRECENT_SHELL — stale, run \`source ~/.bashrc\`)" ;;
+        esac
+        ;;
     -h|--help|help)
         # The header comment block, minus the shebang, is the help text. Bounded by
         # the first line that is not a comment rather than a fixed line range, so

@@ -126,9 +126,32 @@ a repo deleted since it was printed, re-asks rather than failing.
 `LSRECENT_PROMPT=0` turns the prompt off and gives you the listing alone.
 
 The prompt appears only where something can act on the answer: a listing on a
-terminal, run through the shell integration. Piped, redirected, or with the binary
-called directly, it lists and exits, so `lsrecent repos | wc -l` and scripts behave
-exactly as before.
+terminal, run through the shell integration. Piped or redirected it lists and exits,
+so `lsrecent repos | wc -l` and scripts behave exactly as before. On a terminal but
+without the integration it says so instead of prompting — see below.
+
+### If the numbers appear but nothing asks for one
+
+```
+→ cd-by-number needs the shell integration reloaded (shell has 1.5.0, binary is 1.5.1)
+```
+
+The binary is upgraded in place; a shell keeps whatever `shell-init` defined when it
+started. Upgrade while a terminal is open and that terminal is left holding the old
+functions — which, if they predate the prompt, never set `$LSRECENT_CD_FILE`, so the
+listing prints its numbers and simply ends. Nothing is broken and nothing is wrong on
+screen, which is what makes it worth an explicit message.
+
+`shell-init` therefore exports `LSRECENT_SHELL` with its own version, and the binary
+compares it. `source ~/.bashrc`, or open a new terminal, and it is gone. To ask
+directly:
+
+```
+$ lsrecent --version
+lsrecent 1.5.1 (shell integration: 1.5.0 — stale, run `source ~/.bashrc`)
+```
+
+which also reports `loaded` or `not loaded in this shell`.
 
 ### Why the answer travels through a file
 
@@ -366,7 +389,7 @@ ls() {
 
 Matching is exact — no subdirectory inheritance. Enabling `~/repos/github` does **not** change `ls` inside `~/repos/github/some-project`; inside a project you usually want a conventional listing.
 
-Because the wrapper's logic lives in the binary (`shell-init`, `check`), updating the binary updates the behavior everywhere — the repo/binary is the single source of truth, and your `.bashrc` never needs to change again.
+Because the wrapper's logic lives in the binary (`shell-init`, `check`), updating the binary updates the behavior everywhere — the repo/binary is the single source of truth, and your `.bashrc` never needs to change again. The one thing that does not update itself is the wrapper *already loaded* into a shell that is open at the time; it is replaced at the next `source ~/.bashrc`, and until then the binary says so rather than behaving oddly ([above](#if-the-numbers-appear-but-nothing-asks-for-one)).
 
 ## Design notes
 
