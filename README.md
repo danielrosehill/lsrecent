@@ -55,6 +55,8 @@ lsrt                  # same, restricted to today's
 
 lsreg [args]          # plain ls, even where the grouped view is the default
 <number>              # cd into that entry of the last listing
+
+lsrepos --all         # the whole listing, past one screenful (-a works too)
 ```
 
 ## Repository level
@@ -118,6 +120,48 @@ bash runs that handler in a forked subshell, so any `cd` it performs dies with t
 fork. Numbers are only bound by listings run through the shell integration (bare
 `ls`, `lsrepos`, `lstoday`); `lsrecent repos` invoked directly still writes the
 map, but a subprocess cannot define functions in your shell.
+
+## One screenful by default
+
+250 repositories is 130 rows of output, which scrolls the answer off the screen
+and takes your scrollback with it. Repository listings therefore stop when the
+screen is full and tell you what they left out:
+
+```
+━━ PAST WEEK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 31 DSR-Holdings-Cloud   32 dsrholdings-accounting-plugin
+ 33 Israel-Cable-Sourcing   34 Hebrew-Tech-Vocab
+… 219 more · lsrepos --all
+```
+
+Truncation is only sound here because of the ordering: groups run newest-first
+and so do their contents, so cutting from the end drops precisely the repos you
+are least likely to want. Once anything has been cut the remaining groups are
+only counted, never partially shown — printing *OLDER* after eliding half of
+*PAST MONTH* would misrepresent the recency order the whole view is built on.
+
+The budget is the terminal height less three rows, so the listing, the footer and
+your prompt all land on one screen. To change or defeat it:
+
+```bash
+lsrepos --all              # or -a: no limit
+LSRECENT_MAX_ROWS=60 ls    # explicit budget; 0 means unlimited
+lsrepos --all | less -R    # if you want a real pager
+```
+
+A **redirected or piped** listing is never truncated — `lsrecent | wc -l` sees all
+255, the same way `ls` drops its columns when it is not talking to a terminal.
+The numbering covers exactly what was printed, so a number you cannot see is
+never bound to something: in a truncated listing `37` is simply not a command.
+
+A pager is deliberately not the default. It would take over the screen and demand
+a `q` for a listing you wanted to glance at, and the numbers are only useful while
+they are still visible in front of your prompt.
+
+Note that the **directory-level** view (inside a repo) is not budgeted; it still
+prints in full, because it delegates its layout to `ls -C`, which packs
+column-major — cutting rows off the bottom there would drop a scattered subset
+rather than the oldest entries.
 
 ## Getting a plain listing anyway
 
@@ -189,6 +233,10 @@ The binary is its own backend. It manages an include-list and answers membership
 | `lsrecent edit` | Open the include-list in `$EDITOR` |
 | `lsrecent check [dir]` | Exit 0/1 depending on whether the override is enabled (for scripting) |
 
+`shell-init` passes `COLUMNS` and `LINES` through explicitly — interactive bash
+sets both but exports neither, and without them the binary cannot size its columns
+or its row budget without forking `tput`.
+
 `shell-init` also defines the `lsr-add`, `lsr-remove` and `lsr-edit` aliases,
 `lsreg`, the `lsrp` / `lsrt` picker functions, and `lsrepos` / `lstoday`. The last
 two are functions rather than aliases because they have to bind the numbers they
@@ -238,6 +286,7 @@ Because the wrapper's logic lives in the binary (`shell-init`, `check`), updatin
 - **Recency source is mtime, except where it can't be.** Access time (atime) would literally mean "last opened", but on modern Linux `relatime`/`noatime` mounts make it unreliable, and merely listing or backing up a tree can touch it. Modification time is stable and, for project directories, tracks real activity — but it cannot express "I opened this", which is why repo-level views also consult the visit log.
 - **Ordering within a bucket** is most-recent-first.
 - **Directory-level layout is delegated to `ls`** (`ls -dtC --color=always`), so you get the exact column packing and file-type colors you're used to. Repo-level layout can't be: `ls` re-sorts its operands, and repos resolve from many different parents, so that view does its own column packing against the computed order. It fills **row-major**, unlike `ls -C` — once entries are numbered, column-major would run 1, 2, 3 down the page instead of across it.
+- **`[[ -t 1 ]]` is always false inside `$(...)`** — stdout there is the pipe bash created to capture the substitution, not the terminal. A helper called as `budget=$(row_budget)` therefore cannot ask whether it is talking to a terminal; the answer is sampled once at the top level into `stdout_tty`. `tput lines` has the same problem from a different angle: it sizes the terminal from an ioctl on *its* stdout, so inside a substitution it reports terminfo's static default rather than the real height. Hence `LINES` from `shell-init`, falling back to `stty size < /dev/tty`.
 - **A bash function returns the status of its last command**, which bit this tool hard: `collect_repos` ended with an `(( a > b ))` test, so whenever a recorded visit was merely *not newer* than the repo's mtime it returned 1, and every caller's `|| die "no git repositories under $root"` fired with 255 repos sitting in the array. Any function here whose result is "did it work" ends with an explicit `return 0`.
 - **Headers** are full-width `━` rules with bold bright ANSI colors (green / cyan / yellow / magenta / gray), sized to the terminal width.
 - **The override lives in a shell function**, because changing what bare `ls` does mid-session requires shell-level logic — but the function is deliberately minimal and generated by the binary, so all real behavior stays in one place.

@@ -17,6 +17,10 @@
 # number and pressing enter cds into it. `lsrecent path N` resolves a number to
 # its path (what the shell functions call).
 #
+# Repo listings stop at one screenful, oldest cut first, and say how many they
+# elided. `--all` (`-a`) prints everything; $LSRECENT_MAX_ROWS overrides the row
+# budget (0 = unlimited). A redirected or piped listing is never truncated.
+#
 # Override management (the "micro-backend"):
 #   lsrecent add [dir]       Enable the plain-`ls` override for dir (default: .)
 #   lsrecent remove [dir]    Disable the override for dir (default: .)
@@ -42,13 +46,18 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
 state_dir="${XDG_DATA_HOME:-$HOME/.local/share}/lsrecent"
 visit_log="$state_dir/opened.log"
 sel_map="$state_dir/last-list"
+
+# Whether the listing is bound for a terminal. Has to be sampled here, at the top
+# level: inside a $(...) substitution stdout is the pipe bash set up to capture
+# the output, so `[[ -t 1 ]]` in a helper called that way is always false.
+if [[ -t 1 ]]; then stdout_tty=1; else stdout_tty=0; fi
 
 # Compact the visit log once it grows past this many lines.
 PRUNE_THRESHOLD=5000
@@ -305,37 +314,72 @@ declare -a sel_paths=()
 sel_n=0
 sel_total=0
 
-# Column-pack pre-ordered "display<TAB>abspath" entries, numbering as it goes.
-# `ls -C` cannot be reused at repo level: it re-sorts operands (or, with -U, only
-# preserves order for names it can resolve from one directory), and repos live
-# under many different parents. Filling row-major matters now that entries are
-# numbered — column-major would print 1, 2, 3 down the page instead of across.
-pack_numbered() {
+# How wide a group's columns must be and how many fit on a row. Split out of the
+# printing so a group's row count is known *before* anything is emitted, which is
+# what lets the row budget below decide where to stop.
+pn_per=1
+pn_numw=2
+pn_namew=2
+plan_columns() {
     local cols=$1; shift
-    (( $# )) || return 0
     local e n max=0
     for e; do
         n=${e%%$'\t'*}
         (( ${#n} > max )) && max=${#n}
     done
-    local numw=${#sel_total}
-    (( numw < 2 )) && numw=2
-    local namew=$(( max + 2 ))
-    local width=$(( numw + 2 + namew ))
-    local per=$(( cols / width ))
-    (( per < 1 )) && per=1
-    local i=0 path
+    pn_numw=${#sel_total}
+    (( pn_numw < 2 )) && pn_numw=2
+    pn_namew=$(( max + 2 ))
+    pn_per=$(( cols / (pn_numw + 2 + pn_namew) ))
+    (( pn_per < 1 )) && pn_per=1
+}
+
+# Column-pack pre-ordered "display<TAB>abspath" entries, numbering as it goes.
+# Call plan_columns for the same group first. `ls -C` cannot be reused at repo
+# level: it re-sorts operands (or, with -U, only preserves order for names it can
+# resolve from one directory), and repos live under many different parents.
+# Filling row-major matters now that entries are numbered — column-major would
+# print 1, 2, 3 down the page instead of across.
+pack_numbered() {
+    (( $# )) || return 0
+    local e n path i=0
     for e; do
         n=${e%%$'\t'*}
         path=${e#*$'\t'}
         (( ++sel_n ))
         sel_paths[sel_n]=$path
         printf '\e[90m%*d\e[0m \e[01;34m%-*s\e[0m' \
-            "$numw" "$sel_n" "$namew" "$n"
-        (( ++i % per == 0 )) && printf '\n'
+            "$pn_numw" "$sel_n" "$pn_namew" "$n"
+        (( ++i % pn_per == 0 )) && printf '\n'
     done
-    (( i % per )) && printf '\n'
+    (( i % pn_per )) && printf '\n'
     return 0
+}
+
+# Rows a listing may occupy. 0 means unlimited, which is also what a redirected
+# stdout gets: a pipe should receive the whole listing, the same way `ls` drops
+# its columns when it is not talking to a terminal.
+row_budget() {
+    local override=${LSRECENT_MAX_ROWS:-}
+    if [[ -n "$override" ]]; then
+        [[ "$override" =~ ^[0-9]+$ ]] || die "LSRECENT_MAX_ROWS must be a number: $override"
+        echo "$override"
+        return 0
+    fi
+    (( stdout_tty )) || { echo 0; return 0; }
+    # LINES comes from shell-init. Falling back to `stty size` on /dev/tty rather
+    # than `tput lines` for the same reason as above: tput sizes the terminal from
+    # an ioctl on its own stdout, which here is a pipe, so it would answer with
+    # terminfo's static default instead of the real height.
+    local rows=${LINES:-}
+    if [[ -z "$rows" ]]; then
+        rows=$( { stty size < /dev/tty; } 2>/dev/null )
+        rows=${rows%% *}
+    fi
+    [[ "$rows" =~ ^[0-9]+$ ]] || rows=24
+    # Spend at most the visible screen, leaving the prompt and the "N more"
+    # footer somewhere to land.
+    echo $(( rows > 6 ? rows - 3 : 3 ))
 }
 
 # Persist the numbering so the shell's number-functions can resolve it after the
@@ -372,7 +416,16 @@ cmd_path() {
 # ---------------------------------------------------------------------------
 
 cmd_show() {
-    local target="${1:-.}"
+    local target="" passthru=()
+    while (( $# )); do
+        case "$1" in
+            --all|-a) passthru+=("$1") ;;
+            -*)       die "unknown option: $1" ;;
+            *)        target=$1 ;;
+        esac
+        shift
+    done
+    [[ -n "$target" ]] || target="."
     [[ -d "$target" ]] || die "not a directory: $target"
 
     # A directory that only groups repositories is more useful listed as
@@ -382,7 +435,7 @@ cmd_show() {
     # and folders *are* the content.
     if [[ ! -e "$target/.git" ]] && has_nested_repo "$target"; then
         local abs; abs=$(resolve "$target") || die "no such directory: $target"
-        cmd_repos "$abs"
+        cmd_repos "${passthru[@]}" "$abs"
         return
     fi
 
@@ -443,13 +496,14 @@ cmd_show() {
 # ---------------------------------------------------------------------------
 
 cmd_repos() {
-    local today_only=0 full=0 root=""
+    local today_only=0 full=0 no_limit=0 root=""
     while (( $# )); do
         case "$1" in
-            --today) today_only=1 ;;
-            --full)  full=1 ;;
-            -*)      die "unknown option: $1" ;;
-            *)       root=$1 ;;
+            --today)   today_only=1 ;;
+            --full)    full=1 ;;
+            --all|-a)  no_limit=1 ;;
+            -*)        die "unknown option: $1" ;;
+            *)         root=$1 ;;
         esac
         shift
     done
@@ -490,27 +544,73 @@ cmd_repos() {
     sel_total=$(( ${#g_today[@]} + ${#g_week[@]} + ${#g_month[@]} \
                   + ${#g_quarter[@]} + ${#g_older[@]} ))
 
-    local shown=0
+    # Print oldest-group-last, stopping when the screen is full. Because both the
+    # groups and their contents run newest-first, cutting from the end drops
+    # exactly the least interesting repos — so a truncated listing is still the
+    # right answer to "what was I working on recently?", and the numbering only
+    # ever covers what is actually on screen.
+    local -a group_labels=("TODAY" "PAST WEEK" "PAST MONTH" "PAST 3 MONTHS" "OLDER")
+    local -a group_colors=(92 96 93 95 90)
+    local -a group_vars=(g_today g_week g_month g_quarter g_older)
 
-    show_group() {
-        local color=$1 label=$2
-        shift 2
-        (( $# == 0 )) && return 0
+    local budget=0
+    (( no_limit )) || budget=$(row_budget)
+
+    local shown=0 used=0 hidden=0 i count overhead rows_needed avail take ref
+    for i in "${!group_vars[@]}"; do
+        # Copied out by indirect expansion rather than a nameref: a `local -n`
+        # cannot be re-pointed on the next iteration without unsetting it first,
+        # and the `continue`s below would skip that unset.
+        ref="${group_vars[$i]}[@]"
+        local -a grp=("${!ref}")
+        count=${#grp[@]}
+        (( count )) || continue
+
+        # Once anything has been cut, the rest is only counted for the footer:
+        # showing a later group after eliding an earlier one would misrepresent
+        # the recency order the whole listing is built on.
+        if (( hidden )); then
+            hidden=$(( hidden + count ))
+            continue
+        fi
+
+        plan_columns "$cols" "${grp[@]}"
+        rows_needed=$(( (count + pn_per - 1) / pn_per ))
+        overhead=1
+        (( shown )) && overhead=2   # blank separator line, then the header
+
+        take=$count
+        if (( budget > 0 )); then
+            avail=$(( budget - used - overhead ))
+            # The newest group always gets its header and at least one row: a
+            # budget too small to fit anything must not make a non-empty listing
+            # fall through to the "nothing here" message.
+            (( shown == 0 && avail < 1 )) && avail=1
+            if (( avail < 1 )); then
+                hidden=$(( hidden + count ))
+                continue
+            fi
+            if (( rows_needed > avail )); then
+                rows_needed=$avail
+                take=$(( avail * pn_per ))
+                (( take > count )) && take=$count
+            fi
+        fi
+
         (( shown )) && echo
         shown=1
-        print_header "$color" "$label" "$cols"
-        pack_numbered "$cols" "$@"
-    }
-
-    show_group 92 "TODAY"          "${g_today[@]}"
-    if (( ! today_only )); then
-        show_group 96 "PAST WEEK"      "${g_week[@]}"
-        show_group 93 "PAST MONTH"     "${g_month[@]}"
-        show_group 95 "PAST 3 MONTHS"  "${g_quarter[@]}"
-        show_group 90 "OLDER"          "${g_older[@]}"
-    fi
+        print_header "${group_colors[$i]}" "${group_labels[$i]}" "$cols"
+        pack_numbered "${grp[@]:0:take}"
+        used=$(( used + overhead + rows_needed ))
+        hidden=$(( hidden + count - take ))
+    done
 
     if (( shown )); then
+        if (( hidden )); then
+            local hint="lsrepos"
+            (( today_only )) && hint="lstoday"
+            printf '\e[90m… %d more · %s --all\e[0m\n' "$hidden" "$hint"
+        fi
         write_sel_map
         return 0
     fi
@@ -616,18 +716,22 @@ __lsrecent_jump() {
     [[ -n $d ]] && cd "$d"
 }
 
-# COLUMNS is set by interactive bash but not exported, so pass it through
-# explicitly — otherwise the binary has to fork `tput`.
+# COLUMNS and LINES are set by interactive bash but not exported, so pass them
+# through explicitly — otherwise the binary has to fork `tput` to size the
+# listing and its row budget.
 lsrepos() {
-    COLUMNS="${COLUMNS:-}" lsrecent repos "$@" && __lsrecent_bind_numbers
+    COLUMNS="${COLUMNS:-}" LINES="${LINES:-}" lsrecent repos "$@" \
+        && __lsrecent_bind_numbers
 }
 lstoday() {
-    COLUMNS="${COLUMNS:-}" lsrecent today "$@" && __lsrecent_bind_numbers
+    COLUMNS="${COLUMNS:-}" LINES="${LINES:-}" lsrecent today "$@" \
+        && __lsrecent_bind_numbers
 }
 
 ls() {
     if (( $# == 0 )) && [[ -t 1 ]] && lsrecent check 2>/dev/null; then
-        COLUMNS="${COLUMNS:-}" lsrecent && __lsrecent_bind_numbers
+        COLUMNS="${COLUMNS:-}" LINES="${LINES:-}" lsrecent \
+            && __lsrecent_bind_numbers
     else
         command ls --color=auto "$@"
     fi
@@ -690,7 +794,7 @@ case "${1:-}" in
     shell-init)  cmd_shell_init ;;
     -v|--version|version) echo "lsrecent $VERSION" ;;
     -h|--help|help)
-        sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'
+        sed -n '2,47p' "$0" | sed 's/^# \{0,1\}//'
         ;;
     *)           cmd_show "${1:-}" ;;
 esac
