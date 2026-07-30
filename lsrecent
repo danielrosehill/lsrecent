@@ -34,7 +34,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -59,6 +59,22 @@ EOF
 
 resolve() {
     realpath -- "${1:-$PWD}" 2>/dev/null
+}
+
+# Fork-free clock. `date` costs ~7ms a call and this runs on every bare `ls`;
+# bash's printf can do both without leaving the process.
+now_epoch() {
+    printf '%(%s)T' -1
+}
+
+# Epoch of today's local midnight, for calendar-day bucketing.
+midnight_epoch() {
+    local now h m s
+    now=$(now_epoch)
+    printf -v h '%(%H)T' -1
+    printf -v m '%(%M)T' -1
+    printf -v s '%(%S)T' -1
+    printf '%s' "$(( now - (10#$h * 3600 + 10#$m * 60 + 10#$s) ))"
 }
 
 die() {
@@ -102,13 +118,26 @@ cmd_list() {
 }
 
 cmd_check() {
-    local d; d=$(resolve "$1") || exit 1
-    local line
     [[ -f "$config" ]] || exit 1
+
+    # Try the unresolved path first. It matches in the overwhelming majority of
+    # cases and costs no fork; realpath is only needed when the caller reached
+    # the directory through a symlink.
+    local raw="${1:-$PWD}" line
+    local -a entries=()
     while IFS= read -r line; do
         [[ -z "$line" || "$line" == \#* ]] && continue
-        [[ "$d" == "${line/#\~/$HOME}" ]] && exit 0
+        line="${line/#\~/$HOME}"
+        [[ "$raw" == "$line" ]] && exit 0
+        entries+=("$line")
     done < "$config"
+
+    (( ${#entries[@]} )) || exit 1
+    local d; d=$(resolve "$raw") || exit 1
+    [[ "$d" == "$raw" ]] && exit 1
+    for line in "${entries[@]}"; do
+        [[ "$d" == "$line" ]] && exit 0
+    done
     exit 1
 }
 
@@ -130,13 +159,13 @@ cmd_visit() {
     local d; d=$(resolve "$1") || return 0
     [[ -e "$d/.git" ]] || return 0
     mkdir -p "$state_dir" 2>/dev/null || return 0
-    printf '%s\t%s\n' "$(date +%s)" "$d" >> "$visit_log" 2>/dev/null
+    printf '%s\t%s\n' "$(now_epoch)" "$d" >> "$visit_log" 2>/dev/null
     return 0
 }
 
 cmd_prune() {
     [[ -f "$visit_log" ]] || return 0
-    local cutoff=$(( $(date +%s) - PRUNE_MAX_AGE_DAYS * 86400 ))
+    local cutoff=$(( $(now_epoch) - PRUNE_MAX_AGE_DAYS * 86400 ))
     local tmp; tmp=$(mktemp "$state_dir/opened.XXXXXX") || return 0
     local -A keep=()
     local t p
@@ -272,16 +301,19 @@ cmd_show() {
 
     local cols; cols=$(term_cols)
     local now midnight
-    now=$(date +%s)
-    midnight=$(date -d "today 00:00:00" +%s)
+    now=$(now_epoch)
+    midnight=$(midnight_epoch)
 
     local g_today=() g_week=() g_month=() g_quarter=() g_older=()
-    local entry name mtime age_days
+    local name mtime age_days
 
-    shopt -s nullglob
-    for entry in "$target"/*; do
-        name=${entry##*/}
-        mtime=$(stat -c %Y -- "$entry" 2>/dev/null) || continue
+    # One `find` for the whole directory rather than a `stat` per entry: at 30
+    # entries that is 194ms against 8ms, and unlike a batched `stat "$dir"/*`
+    # it has no argument-list ceiling. NUL-delimited so newlines in names are
+    # safe; `! -name '.*'` preserves the glob's behaviour of skipping dotfiles.
+    while IFS='|' read -r -d '' mtime name; do
+        [[ -n "$name" ]] || continue
+        mtime=${mtime%.*}
         if (( mtime >= midnight )); then
             g_today+=("$name")
             continue
@@ -292,7 +324,11 @@ cmd_show() {
         elif (( age_days <= 90 )); then g_quarter+=("$name")
         else                            g_older+=("$name")
         fi
-    done
+    done < <(find "$target" -mindepth 1 -maxdepth 1 ! -name '.*' \
+                  -printf '%T@|%f\0' 2>/dev/null)
+
+    # Bucket contents are ordered by `ls -t` at print time, so the order find
+    # happened to yield does not matter here.
 
     local shown=0
 
@@ -339,8 +375,8 @@ cmd_repos() {
 
     local cols; cols=$(term_cols)
     local now midnight
-    now=$(date +%s)
-    midnight=$(date -d "today 00:00:00" +%s)
+    now=$(now_epoch)
+    midnight=$(midnight_epoch)
 
     local g_today=() g_week=() g_month=() g_quarter=() g_older=()
     local ts name age_days
@@ -410,7 +446,7 @@ cmd_pick() {
     load_visits
     collect_repos "$root" || die "no git repositories under $root"
 
-    local midnight; midnight=$(date -d "today 00:00:00" +%s)
+    local midnight; midnight=$(midnight_epoch)
     local names=() ts name
     while IFS=$'\t' read -r ts name; do
         (( today_only && ts < midnight )) && continue
@@ -447,12 +483,14 @@ alias lsr='lsrecent'
 alias lsr-add='lsrecent add'
 alias lsr-remove='lsrecent remove'
 alias lsr-edit='lsrecent edit'
-alias lsrepos='lsrecent repos'
-alias lstoday='lsrecent today'
+alias lsrepos='COLUMNS=$COLUMNS lsrecent repos'
+alias lstoday='COLUMNS=$COLUMNS lsrecent today'
 
 ls() {
     if (( $# == 0 )) && [[ -t 1 ]] && lsrecent check 2>/dev/null; then
-        lsrecent
+        # COLUMNS is set by interactive bash but not exported, so pass it
+        # through explicitly — otherwise the binary has to fork `tput`.
+        COLUMNS="${COLUMNS:-}" lsrecent
     else
         command ls --color=auto "$@"
     fi
