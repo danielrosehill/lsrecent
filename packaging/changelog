@@ -1,3 +1,20 @@
+lsrecent (1.8.0) unstable; urgency=low
+
+  * Repos are now listed alphabetically within each recency bucket. The buckets
+    still run newest-first and still carry the recency; ordering their members
+    against each other ranked by a distinction the timestamps cannot really
+    support, and moved a name around between listings for reasons invisible on
+    screen. A stable position is what makes a bucket scannable for a repo you
+    already have in mind.
+  * `--time` (`-t`) sorts within a bucket newest-first as before, `--name`
+    (`-n`) is the default, and LSRECENT_SORT=time makes --time the default.
+  * Consequence: a listing cut to one screenful now cuts the bucket at the fold
+    alphabetically rather than by age. Whole buckets are still dropped
+    oldest-first, and everything cut is still numbered and reachable from the
+    prompt.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Thu, 30 Jul 2026 16:20:10 +0300
+
 lsrecent (1.7.1) unstable; urgency=low
 
   * shell-init: unalias the names it defines as functions. An alias left over
@@ -6,7 +23,7 @@ lsrecent (1.7.1) unstable; urgency=low
     "syntax error near unexpected token `('" and eval abandoned everything
     after it. Half the grouped views silently never got defined.
 
- -- Daniel Rosehill <daniel@danielrosehill.co.il>  Thu, 30 Jul 2026 18:20:00 +0300
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Thu, 30 Jul 2026 15:58:55 +0300
 
 lsrecent (1.7.0) unstable; urgency=low
 

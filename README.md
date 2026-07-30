@@ -25,7 +25,7 @@ My-Weird-Prompts   UniFi-OS-Server-Migration   laptop-nvme-upgrade
 ...
 ```
 
-The motivating use case: a `~/repos/github` directory with 250+ repositories filed under topic folders, where "what was I working on recently?" matters far more than alphabetical order. There, entries are numbered in recency order and the listing ends by asking which one you want — type the number and you are in it. See [Choosing an entry](#choosing-an-entry).
+The motivating use case: a `~/repos/github` directory with 250+ repositories filed under topic folders, where "what was I working on recently?" is the question a flat alphabetical listing cannot answer. The buckets answer it; inside a bucket the repos are alphabetical, so you can also just find the one you came for. Entries are numbered straight down the listing and it ends by asking which one you want — type the number and you are in it. See [Choosing an entry](#choosing-an-entry).
 
 ## Install
 
@@ -75,6 +75,7 @@ lsrepos               # grouped view at repository level, across the whole tree
 lstoday               # only the repos you opened today
 lsyesterday           # only the repos whose last visit was yesterday
 lsrepos --all         # the whole listing, past one screenful (-a works too)
+lsrepos -t            # newest-first within each bucket, not alphabetical
 
 lsrp                  # fzf picker over every repo, then cd into it
 lsrt / lsry           # same, restricted to today's / yesterday's
@@ -109,8 +110,8 @@ So **`lsrecent [dir]` picks the unit for you**:
 
 ```
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  1 lsrecent            2 HVAC_Repair_0726     3 Driving-Checklists
-  4 MCPJungle-Gateway   5 Cloud-Mounts         6 Twilio-Manager
+  1 Cloud-Mounts        2 Driving-Checklists   3 HVAC_Repair_0726
+  4 lsrecent            5 MCPJungle-Gateway    6 Twilio-Manager
 
 ━━ PAST WEEK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  31 DSR-Holdings-Cloud  32 dsrholdings-accounting-plugin   ...
@@ -122,11 +123,40 @@ defaults to `$LSRECENT_REPO_ROOT`, else `~/repos/github`, else `~/repos`; search
 depth is `$LSRECENT_REPO_DEPTH` (4). Names are shown as bare basenames because
 they are normally unique; `--full` shows `topic/repo` instead.
 
+### Ordering: buckets by recency, names inside them
+
+The **buckets** run newest-first, and that is where the recency lives: *TODAY*
+before *YESTERDAY* before *PAST WEEK*, and a repo sits in exactly one of them.
+**Inside** a bucket the repos are listed **alphabetically** (case-insensitively).
+
+Sorting a bucket by recency too was the original behaviour and it sorted by a
+distinction that is not worth much: everything in *PAST WEEK* is a week old, and
+which of two of them was touched at 14:02 and which at 11:40 is not something you
+know or can predict. So the position of a name in its bucket kept moving between
+listings for reasons invisible on screen, and the only way to find a repo you
+already had in mind was to read the group top to bottom. Alphabetical, the
+position is stable and you can jump to it.
+
+`--time` (`-t`) sorts within a bucket newest-first, `--name` (`-n`) is the
+default, and `LSRECENT_SORT=time` makes `--time` the default for every listing:
+
+```bash
+lsrepos -t            # newest-first inside each bucket
+lstoday -t
+export LSRECENT_SORT=time    # ... or make that the default
+```
+
+One consequence is worth knowing: when a listing is cut to one screenful, the
+bucket at the fold is now cut alphabetically rather than by age, so what is
+missing from it is *M–Z*, not *the oldest*. Whole buckets are still dropped
+oldest-first, and everything cut is still numbered and reachable from the prompt
+by search or `+` — see [One screenful by default](#one-screenful-by-default).
+
 ## Choosing an entry
 
-Repository listings are numbered in recency order across the whole listing — `1`
-is the most recently touched repo, and the count keeps running through *YESTERDAY*,
-*PAST WEEK* and the rest rather than restarting per bucket.
+Repository listings are numbered straight down the listing — `1` is the first repo
+of *TODAY*, and the count keeps running through *YESTERDAY*, *PAST WEEK* and the
+rest rather than restarting per bucket.
 
 **A listing is a question, so it ends by asking it.** Type a number, press enter,
 and the program has done its job — you are standing where you wanted to be:
@@ -134,7 +164,7 @@ and the program has done its job — you are standing where you wanted to be:
 ```
 $ ls
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  1 lsrecent            2 HVAC_Repair_0726     3 Driving-Checklists
+  1 Driving-Checklists  2 HVAC_Repair_0726     3 lsrecent
 → number, text to search, + more, ? help, enter stays: 2
 /home/you/repos/github/home-and-property/HVAC_Repair_0726
 $ pwd
@@ -169,7 +199,7 @@ what you meant:
 ```
 $ ls
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  1 lsrecent            2 HVAC_Repair_0726     3 Driving-Checklists
+  1 Driving-Checklists  2 HVAC_Repair_0726     3 lsrecent
  …
 … 238 more, numbered 21-258 · lsrepos --all to see them
 → number, text to search, + more, ? help, enter stays: noisy
@@ -261,7 +291,7 @@ listing, do something else, and then decide:
 ```
 $ lstoday
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  1 lsrecent   2 HVAC_Repair_0726
+  1 HVAC_Repair_0726   2 lsrecent
 → number to cd, enter to stay:
 $ git -C ~/notes pull
 $ 2                       # still goes where 2 pointed
@@ -302,11 +332,15 @@ range it elided: `35` at the prompt cds into the thirty-fifth repo even though y
 never saw its name, and the path is echoed so you can see where you landed. `--all`
 is for when you want to read the names, not a precondition for reaching them.
 
-Truncation is only sound here because of the ordering: groups run newest-first
-and so do their contents, so cutting from the end drops precisely the repos you
-are least likely to want. Once anything has been cut the remaining groups are
-only counted, never partially shown — printing *OLDER* after eliding half of
-*PAST MONTH* would misrepresent the recency order the whole view is built on.
+Truncation is sound because the groups run newest-first: cutting from the end
+drops the buckets you are least likely to want, whole. Only the bucket at the
+fold is cut part-way, and there the cut lands wherever the
+[within-group order](#ordering-buckets-by-recency-names-inside-them) puts it —
+by name, unless `--time`. Everything in that bucket is the same age anyway, and
+nothing cut is unreachable: it is numbered, and the prompt searches and pages.
+Once anything has been cut the remaining groups are only counted, never partially
+shown — printing *OLDER* after eliding half of *PAST MONTH* would misrepresent
+the recency order the whole view is built on.
 
 The budget is the terminal height less three rows, so the listing, the footer and
 your prompt all land on one screen. To change or defeat it:
@@ -511,7 +545,7 @@ Because the wrapper's logic lives in the binary (`shell-init`, `check`), updatin
 - **A listing is a question.** Anything that numbers its output should be willing to take a number back, so the prompt is the default rather than a flag: the alternative is a tool that shows you the answer and then makes you retype part of it. The non-interactive path still exists for pipes and scripts, where it is the only sensible behaviour — and it is chosen by detecting that situation, not by asking the user to declare it.
 - **Forks are the entire performance story.** A fork costs ~7 ms here, and everything else this tool does is free by comparison. So there is exactly one rule: *no subprocess inside a per-entry loop.* Timestamps come from a single `find -printf`, not a `stat` per entry; the clock comes from bash's `printf '%(%s)T'`, not `date`; `check` compares the raw `$PWD` before paying for `realpath`; `COLUMNS` is passed in by the shell wrapper so the binary never forks `tput`. Measured on a 3000-entry directory: **27.9 s before, 0.15 s after.** The old code was linear in fork count, so it was fine on a 30-entry directory and unusable on a large one — if a change here makes a big directory feel slow again, count the forks first.
 - **Recency source is mtime, except where it can't be.** Access time (atime) would literally mean "last opened", but on modern Linux `relatime`/`noatime` mounts make it unreliable, and merely listing or backing up a tree can touch it. Modification time is stable and, for project directories, tracks real activity — but it cannot express "I opened this", which is why repo-level views also consult the visit log.
-- **Ordering within a bucket** is most-recent-first.
+- **Ordering within a bucket** is alphabetical, case-folded, on the displayed label (`--time` restores the older most-recent-first). The bucket already carries the recency; ranking its members against each other splits hairs the timestamps cannot really support and moves a name around between listings for reasons nothing on screen explains. Directory-level listings keep `ls -t` ordering, because there the bucket contents are files rather than repositories and `ls` owns that layout.
 - **Directory-level layout is delegated to `ls`** (`ls -dtC --color=always`), so you get the exact column packing and file-type colors you're used to. Repo-level layout can't be: `ls` re-sorts its operands, and repos resolve from many different parents, so that view does its own column packing against the computed order. It fills **row-major**, unlike `ls -C` — once entries are numbered, column-major would run 1, 2, 3 down the page instead of across it.
 - **`[[ -t 1 ]]` is always false inside `$(...)`** — stdout there is the pipe bash created to capture the substitution, not the terminal. A helper called as `budget=$(row_budget)` therefore cannot ask whether it is talking to a terminal; the answer is sampled once at the top level into `stdout_tty`. `tput lines` has the same problem from a different angle: it sizes the terminal from an ioctl on *its* stdout, so inside a substitution it reports terminfo's static default rather than the real height. Hence `LINES` from `shell-init`, falling back to `stty size < /dev/tty`.
 - **A bash function returns the status of its last command**, which bit this tool hard: `collect_repos` ended with an `(( a > b ))` test, so whenever a recorded visit was merely *not newer* than the repo's mtime it returned 1, and every caller's `|| die "no git repositories under $root"` fired with 255 repos sitting in the array. Any function here whose result is "did it work" ends with an explicit `return 0`.
