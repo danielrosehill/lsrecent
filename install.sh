@@ -6,16 +6,26 @@ cd "$(dirname "$0")"
 mkdir -p ~/.local/bin
 install -m 755 lsrecent ~/.local/bin/lsrecent
 
-marker="# lsrecent shell integration"
-if ! grep -qF "$marker" ~/.bashrc 2>/dev/null; then
+# Look for the eval itself, in every file bash might source it from — not just for
+# our own marker comment in ~/.bashrc. Someone who put the line in ~/.bash_aliases
+# by hand has the integration installed, and a second eval there is redundant
+# clutter: everything shell-init defines is a redefinition, so the duplicate is
+# harmless but has to be found and removed by hand later.
+installed=""
+for f in ~/.bashrc ~/.bash_aliases ~/.bash_profile ~/.profile; do
+    [[ -f "$f" ]] || continue
+    if grep -q 'lsrecent shell-init' "$f" 2>/dev/null; then installed="$f"; break; fi
+done
+
+if [[ -n "$installed" ]]; then
+    echo "Shell integration already present in $installed — skipped"
+else
     {
         echo ""
-        echo "$marker"
+        echo "# lsrecent shell integration"
         echo 'eval "$(lsrecent shell-init)"'
     } >> ~/.bashrc
     echo "Added shell integration to ~/.bashrc"
-else
-    echo "Shell integration already present — skipped"
 fi
 
 echo "Installed. Open a new terminal (or 'source ~/.bashrc'), then:"
