@@ -39,7 +39,8 @@
 #   23        cd into entry 23 — numbers are the ranking, not the page
 #   text      search labels and paths, case-insensitive; a bare word is a search
 #   /         clear the search, back to the full ranking
-#   +         next page                 -   back to the top of this view
+#   n  or +   next page                 p  or -   previous page
+#   t         back to the top of this view
 #   a         everything in this view, unpaged
 #   ?         the same summary          enter, q, ctrl-d   stay put
 #
@@ -82,7 +83,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.9.0"
+VERSION="1.10.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -94,6 +95,25 @@ sel_map="$state_dir/last-list"
 # level: inside a $(...) substitution stdout is the pipe bash set up to capture
 # the output, so `[[ -t 1 ]]` in a helper called that way is always false.
 if [[ -t 1 ]]; then stdout_tty=1; else stdout_tty=0; fi
+
+# The colour the tool speaks in: the footer, the prompt, the help and every
+# message the browser prints. It used to be 90 — "bright black" — which on a dark
+# terminal is the ink a theme reserves for things you are meant to skim past, and
+# the one line saying how to reach the 229 repositories that did not fit is the
+# last line that should read as decoration. Orange is legible on a black or a
+# white background and collides with nothing else on screen: headers are green,
+# cyan, yellow, magenta and grey, entries are blue, and their numbers stay grey
+# because there de-emphasis is the point.
+#
+# 256-colour orange where the terminal admits to having it, plain yellow — the
+# nearest an 8-colour palette gets — where it does not. COLORTERM is set by
+# essentially every graphical terminal; TERM covers the rest without a fork.
+if [[ "${TERM:-}" == *256color* || "${TERM:-}" == *direct* || -n "${COLORTERM:-}" ]]; then
+    C_HINT=$'\e[38;5;214m'
+else
+    C_HINT=$'\e[33m'
+fi
+C_OFF=$'\e[0m'
 
 # Compact the visit log once it grows past this many lines.
 PRUNE_THRESHOLD=5000
@@ -557,7 +577,7 @@ stale_integration_notice() {
     else
         why="not loaded in this shell"
     fi
-    printf '\e[90m→ cd-by-number needs the shell integration reloaded (%s) — `source ~/.bashrc`, or open a new terminal\e[0m\n' \
+    printf "${C_HINT}→ cd-by-number needs the shell integration reloaded (%s) — \`source ~/.bashrc\`, or open a new terminal${C_OFF}\n" \
         "$why"
 }
 
@@ -606,6 +626,10 @@ prompt_jump() {
 declare -a view=()
 view_from=0
 view_filter=''
+# Where the page most recently printed began. `p` needs it: the page before this
+# one starts one page-length further back, and nothing else records where "this
+# one" started once view_from has moved past its end.
+page_start=0
 
 build_view() {
     view=()
@@ -622,6 +646,40 @@ build_view() {
         view+=( "$i" )
     done
     view_from=0
+    page_start=0
+    plan_view_layout
+}
+
+# Column widths and page length for the current view, measured over the whole of
+# it rather than over the slice about to be printed, and once per view rather
+# than once per page.
+#
+# That is what makes paging reversible. Sized off the visible slice, the number of
+# entries on a page depended on the longest label still *ahead* of it, so page
+# boundaries moved depending on where you started from and `p` could not land back
+# on the page you had just left. A fixed length per view also means the columns
+# line up from one page to the next, and that the page before this one begins at
+# exactly page_start - vp_page.
+vp_per=1
+vp_numw=2
+vp_namew=2
+vp_page=0   # entries per page; 0 = no budget, the whole view is one page
+plan_view_layout() {
+    local i label max=0 cols budget
+    for (( i = 0; i < ${#view[@]}; i++ )); do
+        label=${sel_names[${view[i]}]}
+        (( ${#label} > max )) && max=${#label}
+    done
+    cols=$(term_cols)
+    vp_numw=${#sel_n}
+    (( vp_numw < 2 )) && vp_numw=2
+    vp_namew=$(( max + 2 ))
+    vp_per=$(( cols / (vp_numw + 2 + vp_namew) ))
+    (( vp_per < 1 )) && vp_per=1
+    budget=$(row_budget)
+    vp_page=0
+    (( budget > 0 )) && vp_page=$(( budget * vp_per ))
+    return 0
 }
 
 # Print one page of `view` starting at view_from, and advance it. With $1 set,
@@ -630,60 +688,48 @@ render_page() {
     local unlimited=${1:-}
     local total=${#view[@]}
     if (( total == 0 )); then
-        printf '\e[90mnothing matches "%s" — / on its own clears the search\e[0m\n' \
+        printf "${C_HINT}nothing matches \"%s\" — / on its own clears the search${C_OFF}\n" \
             "$view_filter" > /dev/tty
         return 0
     fi
 
-    local i n label max=0 cols numw namew per
-    for (( i = view_from; i < total; i++ )); do
-        label=${sel_names[${view[i]}]}
-        (( ${#label} > max )) && max=${#label}
-    done
-    cols=$(term_cols)
-    numw=${#sel_n}
-    (( numw < 2 )) && numw=2
-    namew=$(( max + 2 ))
-    per=$(( cols / (numw + 2 + namew) ))
-    (( per < 1 )) && per=1
-
     local cap=$(( total - view_from ))
-    if [[ -z "$unlimited" ]]; then
-        local budget; budget=$(row_budget)
-        (( budget > 0 )) && (( budget * per < cap )) && cap=$(( budget * per ))
-    fi
+    [[ -n "$unlimited" ]] || (( vp_page == 0 || vp_page >= cap )) || cap=$vp_page
 
-    local printed=0
+    page_start=$view_from
+    local i n printed=0
     for (( i = view_from; i < view_from + cap; i++ )); do
         n=${view[i]}
         printf '\e[90m%*d\e[0m \e[01;34m%-*s\e[0m' \
-            "$numw" "$n" "$namew" "${sel_names[n]}" > /dev/tty
-        (( ++printed % per == 0 )) && printf '\n' > /dev/tty
+            "$vp_numw" "$n" "$vp_namew" "${sel_names[n]}" > /dev/tty
+        (( ++printed % vp_per == 0 )) && printf '\n' > /dev/tty
     done
-    (( printed % per )) && printf '\n' > /dev/tty
+    (( printed % vp_per )) && printf '\n' > /dev/tty
 
-    local first=$(( view_from + 1 )) last=$(( view_from + printed ))
+    local first=$(( page_start + 1 )) last=$(( page_start + printed ))
     view_from=$last
-    local scope=''
+    local scope='' nav
     [[ -n "$view_filter" ]] && scope=" matching \"$view_filter\""
     if (( view_from < total )); then
-        printf '\e[90m… %d-%d of %d%s · + for the next %d\e[0m\n' \
-            "$first" "$last" "$total" "$scope" \
-            "$(( total - view_from < printed ? total - view_from : printed ))" > /dev/tty
+        printf -v nav ' · n for the next %d' \
+            "$(( total - view_from < printed ? total - view_from : printed ))"
     else
-        printf '\e[90m… %d-%d of %d%s · end\e[0m\n' \
-            "$first" "$last" "$total" "$scope" > /dev/tty
+        nav=' · end'
     fi
+    (( page_start > 0 )) && nav+=' · p for the page before'
+    printf "${C_HINT}… %d-%d of %d%s%s${C_OFF}\n" \
+        "$first" "$last" "$total" "$scope" "$nav" > /dev/tty
 }
 
 browse_help() {
     cat > /dev/tty <<EOF
-$(printf '\e[90m')  23        cd into entry 23 — numbers are the ranking, not the page
+${C_HINT}  23        cd into entry 23 — numbers are the ranking, not the page
   text      search labels and paths for "text" (case-insensitive)
   /         clear the search and go back to the full ranking
-  +         next page          -    back to the top of this view
+  n  or +   next page              p  or -   previous page
+  t         back to the top of this view
   a         everything in this view, unpaged
-  ?         this          enter, q or ctrl-d    stay put$(printf '\e[0m')
+  ?         this          enter, q or ctrl-d    stay put${C_OFF}
 EOF
 }
 
@@ -696,7 +742,7 @@ browse() {
     view_from=$sel_shown
 
     while :; do
-        printf '\e[90m→ number, text to search, + more, ? help, enter stays: \e[0m' \
+        printf "${C_HINT}→ number, text to search, n next, p back, ? help, enter stays: ${C_OFF}" \
             > /dev/tty
         # A bare `read` with no reply (EOF from ctrl-d) leaves the cursor mid-line.
         IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
@@ -706,18 +752,31 @@ browse() {
                 return 0 ;;
             '?')
                 browse_help; continue ;;
-            '+'|n|N|more)
+            '+'|n|N|next|more)
                 if (( view_from >= ${#view[@]} )); then
-                    printf '\e[90mthat is the end of the list\e[0m\n' > /dev/tty
+                    printf "${C_HINT}that is the end of the list — p goes back${C_OFF}\n" > /dev/tty
                 else
                     render_page
                 fi
                 continue ;;
-            '-'|p|P)
-                # Back to the top rather than a true previous page: the pages are
-                # already in the scrollback above, so scrolling up is the honest
-                # way to see them again, and re-printing them would only make the
-                # same rows appear twice with the same numbers.
+            '-'|p|P|prev|back)
+                # A real previous page, printed again below rather than scrolled
+                # to. Re-printing rows is not the confusion it would be in a pager:
+                # a number *is* the ranking, so an entry that appears twice is the
+                # same repository with the same number both times, and this tool
+                # never clears the screen — walking back down the list has to leave
+                # the same trail in the scrollback that walking up it did.
+                if (( page_start == 0 )); then
+                    printf "${C_HINT}that is the top — the first page is just above${C_OFF}\n" > /dev/tty
+                else
+                    local back=$vp_page
+                    (( back > 0 )) || back=$page_start
+                    view_from=$(( page_start - back ))
+                    (( view_from < 0 )) && view_from=0
+                    render_page
+                fi
+                continue ;;
+            t|T|top)
                 view_from=0; render_page; continue ;;
             a|A|all)
                 view_from=0; render_page unlimited; continue ;;
@@ -744,18 +803,18 @@ browse() {
         fi
 
         if [[ -z ${sel_paths[10#$reply]:-} ]]; then
-            printf '\e[90mno entry %s — 1-%d, or text to search\e[0m\n' \
+            printf "${C_HINT}no entry %s — 1-%d, or text to search${C_OFF}\n" \
                 "$reply" "$sel_n" > /dev/tty
             continue
         fi
         d=${sel_paths[10#$reply]}
         if [[ ! -d "$d" ]]; then
-            printf '\e[90mgone since the listing: %s\e[0m\n' "$d" > /dev/tty
+            printf "${C_HINT}gone since the listing: %s${C_OFF}\n" "$d" > /dev/tty
             continue
         fi
         # Echoed so the destination survives in the scrollback: the prompt line
         # that follows shows the new directory, but this says which number it was.
-        printf '\e[90m%s\e[0m\n' "$d" > /dev/tty
+        printf "${C_HINT}%s${C_OFF}\n" "$d" > /dev/tty
         printf '%s\n' "$d" > "$dest" 2>/dev/null
         return 0
     done
@@ -1043,7 +1102,7 @@ cmd_repos() {
             esac
             # The elided repos are still numbered, so the footer names the range
             # rather than only offering --all: typing 23 works from here.
-            printf '\e[90m… %d more, numbered %d-%d · %s --all to see them\e[0m\n' \
+            printf "${C_HINT}… %d more, numbered %d-%d · n pages to them, %s --all prints them${C_OFF}\n" \
                 "$hidden" "$(( sel_shown + 1 ))" "$sel_n" "$hint"
         fi
         write_sel_map
@@ -1052,8 +1111,8 @@ cmd_repos() {
     fi
 
     if [[ -n "$window" ]]; then
-        printf '\e[90mNo repos opened %s under %s\e[0m\n' "$window" "$root"
-        [[ -s "$visit_log" ]] || printf '\e[90mThe visit log is empty — it starts filling once the shell hook is loaded (open a new shell).\e[0m\n'
+        printf "${C_HINT}No repos opened %s under %s${C_OFF}\n" "$window" "$root"
+        [[ -s "$visit_log" ]] || printf "${C_HINT}The visit log is empty — it starts filling once the shell hook is loaded (open a new shell).${C_OFF}\n"
     else
         echo "(no repositories found under $root)"
     fi

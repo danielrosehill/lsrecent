@@ -1,3 +1,24 @@
+lsrecent (1.10.0) unstable; urgency=low
+
+  * `p` is now a real previous page rather than a jump back to the top, and `n`
+    joins `+` as next. `t` is the way back to the top. Paging only in one
+    direction was a defect dressed as a decision: the line telling you there are
+    229 more repositories is exactly the line you overshoot, and scrolling the
+    terminal to find the page again does not restore the prompt's idea of where
+    you are.
+  * Page length is now measured once per view instead of once per page, over the
+    whole view rather than the slice about to be printed. Sized off the visible
+    slice, a page's length depended on the longest label still ahead of it, so
+    boundaries moved with your starting point and `p` could not land back on the
+    page you had just left. Columns now also line up from one page to the next.
+  * The footer, prompt, help and messages are orange (256-colour where the
+    terminal has it, yellow where it does not) instead of bright black. Grey is
+    the ink a theme reserves for what you are meant to skim past, which is the
+    wrong instruction for the one line saying how to reach what did not fit.
+    Entry numbers stay grey — there de-emphasis is the point.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Wed, 05 Aug 2026 12:30:00 +0300
+
 lsrecent (1.9.0) unstable; urgency=low
 
   * The last week is now a bucket per calendar day: TODAY, YESTERDAY, then

@@ -29,6 +29,10 @@ My-Weird-Prompts   UniFi-OS-Server-Migration   laptop-nvme-upgrade
 ...
 ```
 
+The top of a real listing — plain `ls` in `~/repos/github`, with the shell integration loaded:
+
+![lsrecent in a terminal](docs/screenshot-terminal.png)
+
 The motivating use case: a `~/repos/github` directory with 250+ repositories filed under topic folders, where "what was I working on recently?" is the question a flat alphabetical listing cannot answer. The buckets answer it; inside a bucket the repos are alphabetical, so you can also just find the one you came for. Entries are numbered straight down the listing and it ends by asking which one you want — type the number and you are in it. See [Choosing an entry](#choosing-an-entry).
 
 ## Install
@@ -196,7 +200,7 @@ and the program has done its job — you are standing where you wanted to be:
 $ ls
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   1 Driving-Checklists  2 HVAC_Repair_0726     3 lsrecent
-→ number, text to search, + more, ? help, enter stays: 2
+→ number, text to search, n next, p back, ? help, enter stays: 2
 /home/you/repos/github/home-and-property/HVAC_Repair_0726
 $ pwd
 /home/you/repos/github/home-and-property/HVAC_Repair_0726
@@ -217,8 +221,9 @@ what it had just numbered. It accepts more than a number:
 | `23` | cd into entry 23 — **numbers are the ranking, not the page** |
 | `text` | search labels and paths for `text`, case-insensitive |
 | `/` | clear the search, back to the full ranking |
-| `+` | next page |
-| `-` | back to the top of the current view |
+| `n` or `+` | next page |
+| `p` or `-` | previous page |
+| `t` | back to the top of the current view |
 | `a` | everything in the current view, unpaged |
 | `?` | the same summary |
 | enter, `q`, ctrl-d | stay put |
@@ -232,11 +237,11 @@ $ ls
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   1 Driving-Checklists  2 HVAC_Repair_0726     3 lsrecent
  …
-… 238 more, numbered 21-258 · lsrepos --all to see them
-→ number, text to search, + more, ? help, enter stays: noisy
+… 238 more, numbered 21-258 · n pages to them, lsrepos --all prints them
+→ number, text to search, n next, p back, ? help, enter stays: noisy
  79 noisycity-api-blueprint
 … 1-1 of 1 matching "noisy" · end
-→ number, text to search, + more, ? help, enter stays: 79
+→ number, text to search, n next, p back, ? help, enter stays: 79
 /home/you/repos/github/smart-home/noisycity-api-blueprint
 ```
 
@@ -252,8 +257,17 @@ It stays line-oriented rather than becoming a full-screen application, which is 
 deliberate trade. The premise of the tool is that the listing lands in your
 scrollback and stays useful there — an alternate-screen TUI would wipe it on exit,
 taking the numbers with it. So each page prints and scrolls like any other command
-output, and `-` goes back to the top of the view rather than re-printing a previous
-page that is already a few lines up the terminal.
+output — including `p`, which prints the previous page again below rather than
+scrolling up to where it already is. That is not the duplication it would be in a
+pager: a number *is* the ranking, so an entry printed twice is the same repository
+with the same number both times, and walking back down the list should leave the
+same trail in the scrollback that walking up it did.
+
+Pages are a fixed length within a view, measured over the whole view rather than
+over the slice about to be printed. That is what makes `n` and `p` inverses of each
+other — sized off the visible slice, a page's length depended on the longest label
+still ahead of it, so its boundaries moved with the direction of travel — and it
+also keeps the columns lined up from one page to the next.
 
 The prompt appears only where something can act on the answer: a listing on a
 terminal, run through the shell integration. Piped or redirected it lists and exits,
@@ -377,7 +391,7 @@ The budget is the terminal height less three rows, so the listing, the footer an
 your prompt all land on one screen. To change or defeat it:
 
 ```bash
-+                          # at the prompt: next page, no re-run
+n                          # at the prompt: next page, no re-run (p goes back)
 a                          # at the prompt: the rest of the view, unpaged
 lsrepos --all              # or -a: no limit
 LSRECENT_MAX_ROWS=60 ls    # explicit budget; 0 means unlimited
@@ -388,7 +402,7 @@ A **redirected or piped** listing is never truncated — `lsrecent | wc -l` sees
 255, the same way `ls` drops its columns when it is not talking to a terminal.
 
 None of this is the only way past the fold, and usually not the best one: the
-prompt itself pages with `+` and searches by name, so the elided repos are
+prompt itself pages with `n` and `p` and searches by name, so the elided repos are
 reachable without re-running anything. See [the browser](#the-prompt-is-also-a-browser).
 
 A pager is deliberately not the default. It would take over the screen and demand
@@ -585,6 +599,7 @@ Because the wrapper's logic lives in the binary (`shell-init`, `check`), updatin
 - **`[[ -t 1 ]]` is always false inside `$(...)`** — stdout there is the pipe bash created to capture the substitution, not the terminal. A helper called as `budget=$(row_budget)` therefore cannot ask whether it is talking to a terminal; the answer is sampled once at the top level into `stdout_tty`. `tput lines` has the same problem from a different angle: it sizes the terminal from an ioctl on *its* stdout, so inside a substitution it reports terminfo's static default rather than the real height. Hence `LINES` from `shell-init`, falling back to `stty size < /dev/tty`.
 - **A bash function returns the status of its last command**, which bit this tool hard: `collect_repos` ended with an `(( a > b ))` test, so whenever a recorded visit was merely *not newer* than the repo's mtime it returned 1, and every caller's `|| die "no git repositories under $root"` fired with 255 repos sitting in the array. Any function here whose result is "did it work" ends with an explicit `return 0`.
 - **Headers** are full-width `━` rules with bold bright ANSI colors (green / cyan / yellow / magenta / gray), sized to the terminal width.
+- **The tool speaks in orange.** The footer, the prompt, the help and every message the browser prints used to be ANSI 90 — "bright black" — which on a dark terminal is the ink a theme reserves for what you are meant to skim past. The line saying how to reach the 229 repositories that did not fit is the last line that should read as decoration. Orange (256-colour 214, falling back to plain yellow where `TERM`/`COLORTERM` do not claim 256 colours) is legible on a black or a white background and collides with nothing else on screen. Entry **numbers** stay grey: there, de-emphasis is the point — they sit beside the name they belong to and only have to be readable once you are looking for one.
 - **The override lives in a shell function**, because changing what bare `ls` does mid-session requires shell-level logic — but the function is deliberately minimal and generated by the binary, so all real behavior stays in one place.
 
 ## License
