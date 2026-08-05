@@ -1,3 +1,19 @@
+lsrecent (1.9.0) unstable; urgency=low
+
+  * The last week is now a bucket per calendar day: TODAY, YESTERDAY, then
+    2 DAYS AGO through 7 DAYS AGO. PAST WEEK is gone; PAST MONTH, PAST 3 MONTHS
+    and OLDER are unchanged. "Today or yesterday?" was always the question these
+    listings answer and it does not stop being the question at 48 hours — a
+    single week-long bucket was routinely the biggest heap on the screen.
+  * Empty days are not printed, so a quiet week costs nothing. A busy one is a
+    longer listing; the screenful budget cuts it as before and everything below
+    the fold is still numbered and reachable from the prompt.
+  * The eight day boundaries are walked one snapped midnight at a time rather
+    than multiplied out from today's, so a week containing a DST change still
+    has seven days in it. Verified against all 365 days of 2026 in eight zones.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Wed, 05 Aug 2026 11:46:46 +0300
+
 lsrecent (1.8.0) unstable; urgency=low
 
   * Repos are now listed alphabetically within each recency bucket. The buckets

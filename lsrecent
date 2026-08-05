@@ -15,11 +15,14 @@
 #   lsrecent pick [root]     fzf picker over repos; prints the chosen path
 #                            (use the `lsrp` / `lsrt` / `lsry` functions to cd)
 #
-# Ordering. Groups run newest-first — TODAY, YESTERDAY, PAST WEEK … — and that is
-# where the recency lives. Within a group repos are listed alphabetically, so a
-# bucket can be scanned for a name you already have in mind. `--time` (`-t`) sorts
-# a group newest-first instead, `--name` (`-n`) is the default; LSRECENT_SORT=time
-# makes --time the default.
+# Buckets. The last week is one bucket per calendar day — TODAY, YESTERDAY, then
+# 2 DAYS AGO through 7 DAYS AGO — and then PAST MONTH, PAST 3 MONTHS and OLDER. A
+# repo has one timestamp, so it appears under exactly one of them.
+#
+# Ordering. Groups run newest-first and that is where the recency lives. Within a
+# group repos are listed alphabetically, so a bucket can be scanned for a name you
+# already have in mind. `--time` (`-t`) sorts a group newest-first instead,
+# `--name` (`-n`) is the default; LSRECENT_SORT=time makes --time the default.
 #
 # Choosing an entry. Repo listings are numbered straight down the listing — 1 is
 # the first repo of the newest group — and end with a prompt: type a number,
@@ -79,7 +82,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.8.0"
+VERSION="1.9.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -162,6 +165,22 @@ snap_midnight() {
 # change made 23 or 25 hours long still yields the right boundary.
 yesterday_midnight_epoch() {
     snap_midnight "$(( $1 - 43200 ))"
+}
+
+# The local midnights opening the last eight calendar days, newest first, given
+# today's: day_mid[0] is today's, [1] yesterday's, … [7] seven days back. Each is
+# snapped from midday of the day before rather than reached by subtracting 86400,
+# for the same reason as above — walked in steps so that a week containing a DST
+# change still yields eight correct boundaries rather than drifting an hour further
+# out with every day. Eight snaps, all fork-free.
+declare -a day_mid=()
+day_midnights() {
+    local mid=$1 i
+    day_mid=("$mid")
+    for (( i = 1; i <= 7; i++ )); do
+        mid=$(snap_midnight "$(( mid - 43200 ))")
+        day_mid+=("$mid")
+    done
 }
 
 # The recency window a listing is restricted to: "" (everything), today, or
@@ -869,15 +888,16 @@ cmd_repos() {
     collect_repos "$root" || die "no git repositories under $root"
 
     local cols; cols=$(term_cols)
-    local now midnight y_midnight
+    local now midnight
     now=$(now_epoch)
     midnight=$(midnight_epoch)
-    y_midnight=$(yesterday_midnight_epoch "$midnight")
+    day_midnights "$midnight"
 
     # Entries are "display<TAB>abspath": the display name drops the topic folder
     # unless --full, but the number has to resolve to a real path, and sorted_repos
     # yields paths relative to root.
-    local g_today=() g_yest=() g_week=() g_month=() g_quarter=() g_older=()
+    local g_today=() g_yest=() g_d2=() g_d3=() g_d4=() g_d5=() g_d6=() g_d7=() \
+          g_month=() g_quarter=() g_older=()
     local ts rel name entry age_days
     local opened_only=0; [[ -n "$window" ]] && opened_only=1
     while IFS=$'\t' read -r ts rel; do
@@ -885,25 +905,33 @@ cmd_repos() {
         in_window "$ts" || continue
         if (( full )); then name=$rel; else name=${rel##*/}; fi
         entry="$name"$'\t'"$root/$rel"
-        # YESTERDAY is its own bucket in the unrestricted listing too, not folded
-        # into PAST WEEK: "was that today or yesterday?" is the question actually
-        # being asked, and a repo has one newest timestamp, so it lands in exactly
-        # one of them. With a window set every entry falls in a single bucket
-        # anyway, and the group loop below prints just that one.
-        if   (( ts >= midnight ));   then g_today+=("$entry")
-        elif (( ts >= y_midnight )); then g_yest+=("$entry")
+        # The last week gets one bucket per calendar day rather than a single PAST
+        # WEEK. "Today or yesterday?" was always the question being asked, and it
+        # does not stop being the question at 48 hours: "Tuesday" and "six days
+        # ago" are different answers, and a week of repos in one heap is exactly
+        # the undifferentiated pile the buckets exist to break up. A repo has one
+        # newest timestamp, so it lands in exactly one bucket. With a window set
+        # every entry falls in a single bucket anyway, and the group loop below
+        # prints just that one.
+        if   (( ts >= day_mid[0] )); then g_today+=("$entry")
+        elif (( ts >= day_mid[1] )); then g_yest+=("$entry")
+        elif (( ts >= day_mid[2] )); then g_d2+=("$entry")
+        elif (( ts >= day_mid[3] )); then g_d3+=("$entry")
+        elif (( ts >= day_mid[4] )); then g_d4+=("$entry")
+        elif (( ts >= day_mid[5] )); then g_d5+=("$entry")
+        elif (( ts >= day_mid[6] )); then g_d6+=("$entry")
+        elif (( ts >= day_mid[7] )); then g_d7+=("$entry")
         else
+            # Below day_mid[7] everything is at least seven days old, so the coarse
+            # buckets here cannot overlap the calendar days above however late in
+            # the day `now` is.
             age_days=$(( (now - ts) / 86400 ))
-            if   (( age_days <= 7 ));  then g_week+=("$entry")
-            elif (( age_days <= 30 )); then g_month+=("$entry")
+            if   (( age_days <= 30 )); then g_month+=("$entry")
             elif (( age_days <= 90 )); then g_quarter+=("$entry")
             else                            g_older+=("$entry")
             fi
         fi
     done < <(sorted_repos "$root" "$opened_only")
-
-    sel_total=$(( ${#g_today[@]} + ${#g_yest[@]} + ${#g_week[@]} + ${#g_month[@]} \
-                  + ${#g_quarter[@]} + ${#g_older[@]} ))
 
     # Print oldest-group-last, stopping when the screen is full. The groups run
     # newest-first, so cutting from the end drops the least interesting buckets
@@ -913,9 +941,17 @@ cmd_repos() {
     # --time. That is survivable because everything cut is still numbered and the
     # prompt can search or page to it; before that was true this had to cut by
     # age.
-    local -a group_labels=("TODAY" "YESTERDAY" "PAST WEEK" "PAST MONTH" "PAST 3 MONTHS" "OLDER")
-    local -a group_colors=(92 32 96 93 95 90)
-    local -a group_vars=(g_today g_yest g_week g_month g_quarter g_older)
+    local -a group_labels=("TODAY" "YESTERDAY" \
+                           "2 DAYS AGO" "3 DAYS AGO" "4 DAYS AGO" \
+                           "5 DAYS AGO" "6 DAYS AGO" "7 DAYS AGO" \
+                           "PAST MONTH" "PAST 3 MONTHS" "OLDER")
+    # The six numbered-day buckets deliberately share one colour. The header colour
+    # says how recent, coarsely — green is now, grey is history — and all six are
+    # "this week"; the label is what distinguishes them, and six shades of cyan
+    # would only invite reading a precision into the colour that is not there.
+    local -a group_colors=(92 32 96 96 96 96 96 96 93 95 90)
+    local -a group_vars=(g_today g_yest g_d2 g_d3 g_d4 g_d5 g_d6 g_d7 \
+                         g_month g_quarter g_older)
 
     # Order within a bucket. The buckets carry the recency — that is the whole
     # point of grouping — so members of one are peers, and sorting them by name
@@ -927,15 +963,20 @@ cmd_repos() {
     # line: the path after the tab would otherwise decide ties by topic folder,
     # so two repos with the same name would sort apart from where their names put
     # them. Under --full the label *is* topic/repo and sorts by topic anyway.
-    if (( by_name )); then
-        local gv gref
-        for gv in "${group_vars[@]}"; do
-            gref="$gv[@]"
-            local -a unsorted=("${!gref}")
-            (( ${#unsorted[@]} > 1 )) || continue
-            mapfile -t "$gv" < <(printf '%s\n' "${unsorted[@]}" | sort -f -t$'\t' -k1,1)
-        done
-    fi
+    #
+    # The same pass totals the listing, since it already visits every group: with a
+    # bucket per day there are eleven of them, and an eleven-term sum written out is
+    # a place for a bucket to be forgotten when the next one is added.
+    local gv gref
+    sel_total=0
+    for gv in "${group_vars[@]}"; do
+        gref="$gv[@]"
+        local -a members=("${!gref}")
+        sel_total=$(( sel_total + ${#members[@]} ))
+        (( by_name )) || continue
+        (( ${#members[@]} > 1 )) || continue
+        mapfile -t "$gv" < <(printf '%s\n' "${members[@]}" | sort -f -t$'\t' -k1,1)
+    done
 
     local budget=0
     (( no_limit )) || budget=$(row_budget)

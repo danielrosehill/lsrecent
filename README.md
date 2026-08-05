@@ -11,9 +11,13 @@ Laptop-Configs  Incoterms_Poster
 ━━ YESTERDAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  (green)
 mqtt-mcp   palgate-multigate
 
-━━ PAST WEEK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  (cyan)
+━━ 2 DAYS AGO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  (cyan)
 Hardware-Purchase-0726   thinkpad-e15-upgrades   android-unroot
+
+━━ 3 DAYS AGO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  (cyan)
 Wheres-My-Stuff-Deploy   Israel-Cable-Sourcing   Hebrew-Tech-Vocab
+
+...                                                       (through 7 DAYS AGO)
 
 ━━ PAST MONTH ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━  (yellow)
 My-Weird-Prompts   UniFi-OS-Server-Migration   laptop-nvme-upgrade
@@ -113,7 +117,7 @@ So **`lsrecent [dir]` picks the unit for you**:
   1 Cloud-Mounts        2 Driving-Checklists   3 HVAC_Repair_0726
   4 lsrecent            5 MCPJungle-Gateway    6 Twilio-Manager
 
-━━ PAST WEEK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━ 3 DAYS AGO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  31 DSR-Holdings-Cloud  32 dsrholdings-accounting-plugin   ...
 ```
 
@@ -123,14 +127,41 @@ defaults to `$LSRECENT_REPO_ROOT`, else `~/repos/github`, else `~/repos`; search
 depth is `$LSRECENT_REPO_DEPTH` (4). Names are shown as bare basenames because
 they are normally unique; `--full` shows `topic/repo` instead.
 
+### A bucket per day for the last week
+
+The recent end of the listing is bucketed by **calendar day**, not by span:
+
+| | |
+| --- | --- |
+| *TODAY* | since local midnight |
+| *YESTERDAY* | the previous calendar day |
+| *2 DAYS AGO* … *7 DAYS AGO* | one bucket each |
+| *PAST MONTH*, *PAST 3 MONTHS*, *OLDER* | everything beyond a week |
+
+"Today or yesterday?" was always the question these views answer, and it does not
+stop being the question at 48 hours — *four days ago* is a place in your week, and
+you can generally say what you were doing there. A single *PAST WEEK* bucket threw
+that away and handed back the undifferentiated heap the grouping exists to break
+up: on a tree of 250 repos it was routinely the largest group on the screen.
+
+Empty days are simply not printed, so a quiet week costs nothing; a busy one is
+longer than the old listing, which is the trade — [the fold](#one-screenful-by-default)
+still cuts it to a screenful and everything below it is still numbered. All six
+day buckets share the one cyan header colour: the colour says *how* recent,
+coarsely, and the label says which day.
+
+Boundaries are local midnights, computed without forking `date` — see
+[Today and yesterday do not overlap](#today-and-yesterday-do-not-overlap) for how
+that survives a DST week.
+
 ### Ordering: buckets by recency, names inside them
 
 The **buckets** run newest-first, and that is where the recency lives: *TODAY*
-before *YESTERDAY* before *PAST WEEK*, and a repo sits in exactly one of them.
+before *YESTERDAY* before *2 DAYS AGO*, and a repo sits in exactly one of them.
 **Inside** a bucket the repos are listed **alphabetically** (case-insensitively).
 
 Sorting a bucket by recency too was the original behaviour and it sorted by a
-distinction that is not worth much: everything in *PAST WEEK* is a week old, and
+distinction that is not worth much: everything in a day bucket is that day's, and
 which of two of them was touched at 14:02 and which at 11:40 is not something you
 know or can predict. So the position of a name in its bucket kept moving between
 listings for reasons invisible on screen, and the only way to find a repo you
@@ -155,7 +186,7 @@ by search or `+` — see [One screenful by default](#one-screenful-by-default).
 ## Choosing an entry
 
 Repository listings are numbered straight down the listing — `1` is the first repo
-of *TODAY*, and the count keeps running through *YESTERDAY*, *PAST WEEK* and the
+of *TODAY*, and the count keeps running through *YESTERDAY*, *2 DAYS AGO* and the
 rest rather than restarting per bucket.
 
 **A listing is a question, so it ends by asking it.** Type a number, press enter,
@@ -320,7 +351,7 @@ and takes your scrollback with it. Repository listings therefore stop when the
 screen is full and tell you what they left out:
 
 ```
-━━ PAST WEEK ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+━━ 4 DAYS AGO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  31 DSR-Holdings-Cloud   32 dsrholdings-accounting-plugin
  33 Israel-Cable-Sourcing   34 Hebrew-Tech-Vocab
 … 219 more, numbered 35-253 · lsrepos --all to see them
@@ -420,18 +451,22 @@ did I last have this open?", and each repo answers it once. If it were "was this
 open at any point yesterday?", most of yesterday's list would be a duplicate of
 today's, which is precisely the noise these views exist to remove.
 
-The same logic makes *YESTERDAY* a bucket of its own in the ordinary `lsrepos`
-listing, rather than being folded into *PAST WEEK* — "today or yesterday?" is the
-distinction you actually reach for, and one timestamp per repo means the buckets
-stay mutually exclusive.
+The same logic is what lets the ordinary `lsrepos` listing carry
+[a bucket per day](#a-bucket-per-day-for-the-last-week): one timestamp per repo
+means the days are mutually exclusive by construction, so no repo is ever printed
+twice and the numbering can run straight down them.
 
 Day boundaries are local midnights, computed with bash's own `printf '%(%H)T'`
-rather than by forking `date`, since bare `ls` goes through this path. Yesterday's
-midnight is *snapped to* rather than reached by subtracting 86400, so a day that a
-DST change made 23 or 25 hours long still gives the right boundary — verified
-against every day of 2026 in eight zones, including 30-minute DST (Lord Howe) and
-the southern hemisphere. Zones that transition *at* midnight, such as
-America/Santiago, land within the hour twice a year; nothing here cares.
+rather than by forking `date`, since bare `ls` goes through this path. Each is
+*snapped to* rather than reached by subtracting 86400, and the eight boundaries a
+listing needs are walked one day at a time rather than multiplied out, so a week
+containing a DST change still has seven days in it instead of drifting an hour
+further out with each one. Verified against all 365 days of 2026 in eight zones —
+23,360 boundaries, no mismatches — including 30-minute DST (Lord Howe) and the
+southern hemisphere. `scripts/verify-day-boundaries.sh` is that check; re-run it
+if you touch `snap_midnight` or `day_midnights`. Zones that transition *at*
+midnight, such as America/Santiago, land within the hour twice a year; nothing
+here cares.
 
 ## The picker
 
