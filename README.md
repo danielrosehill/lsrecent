@@ -83,7 +83,10 @@ lsrepos               # grouped view at repository level, across the whole tree
 lstoday               # only the repos you opened today
 lsyesterday           # only the repos whose last visit was yesterday
 lsrepos --all         # the whole listing, past one screenful (-a works too)
-lsrepos -t            # newest-first within each bucket, not alphabetical
+lsrepos -A            # busiest-first within each bucket, not alphabetical
+lsrepos -t            # newest-first within each bucket
+
+lsrecent noise        # what a tree-wide sweep is being stopped from dating
 
 lsrp                  # fzf picker over every repo, then cd into it
 lsrt / lsry           # same, restricted to today's / yesterday's
@@ -172,14 +175,41 @@ listings for reasons invisible on screen, and the only way to find a repo you
 already had in mind was to read the group top to bottom. Alphabetical, the
 position is stable and you can jump to it.
 
-`--time` (`-t`) sorts within a bucket newest-first, `--name` (`-n`) is the
-default, and `LSRECENT_SORT=time` makes `--time` the default for every listing:
+There are three orders, and `s` at the prompt cycles between them without leaving
+the listing:
+
+| Flag | Order inside a bucket |
+| --- | --- |
+| `--name` (`-n`) | alphabetical, case-insensitive — the default |
+| `--activity` (`-A`) | busiest first: how many times you opened it *that day* |
+| `--time` (`-t`) | newest first, the order the buckets are built in |
 
 ```bash
-lsrepos -t            # newest-first inside each bucket
-lstoday -t
-export LSRECENT_SORT=time    # ... or make that the default
+lsrepos -A            # the busiest repo of each day at the top of its bucket
+lstoday -A
+export LSRECENT_SORT=activity    # ... or make that the default
 ```
+
+**Activity is visits, counted inside the bucket's own day.** A day bucket ranks by
+how many times the [visit log](#opened-today-and-the-visit-log) recorded you
+opening the repo *on that day*, so "busiest" means the same thing in every row of
+the listing rather than rewarding whatever you have been using all month. The
+coarse buckets — *PAST MONTH*, *PAST 3 MONTHS*, *OLDER*, *UNDATED* — have no single
+day to count, so they count the whole log and rank by how often you go back to the
+thing at all.
+
+It is deliberately a count of *visits*, not of edits or of commits: a visit is the
+one thing recorded per event rather than inferred from a timestamp, so it can be
+counted. A day you dipped into forty repositories and worked in four looks, in the
+default alphabetical order, like forty equal repositories; `-A` puts the four at
+the top. Repos with no visits that day score zero and fall to the bottom in
+alphabetical order — so a bucket nobody visited looks exactly like `-n`, rather
+than shuffling for no visible reason.
+
+`s` re-prints the listing rather than re-ordering it in place, which renumbers it:
+a number is a position in *a* ranking, and changing the order makes a new one. The
+new listing prints above the prompt the way running the command again would, and
+the old one stays in the scrollback.
 
 One consequence is worth knowing: when a listing is cut to one screenful, the
 bucket at the fold is now cut alphabetically rather than by age, so what is
@@ -200,7 +230,7 @@ and the program has done its job — you are standing where you wanted to be:
 $ ls
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   1 Driving-Checklists  2 HVAC_Repair_0726     3 lsrecent
-→ number, text to search, n next, p back, ? help, enter stays: 2
+→ number, text to search, n/p pages, s sort, ? help, enter stays: 2
 /home/you/repos/github/home-and-property/HVAC_Repair_0726
 $ pwd
 /home/you/repos/github/home-and-property/HVAC_Repair_0726
@@ -225,6 +255,7 @@ what it had just numbered. It accepts more than a number:
 | `p` or `-` | previous page |
 | `t` | back to the top of the current view |
 | `a` | everything in the current view, unpaged |
+| `s` | cycle the order inside each group: name → activity → time |
 | `?` | the same summary |
 | enter, `q`, ctrl-d | stay put |
 
@@ -238,10 +269,10 @@ $ ls
   1 Driving-Checklists  2 HVAC_Repair_0726     3 lsrecent
  …
 … 238 more, numbered 21-258 · n pages to them, lsrepos --all prints them
-→ number, text to search, n next, p back, ? help, enter stays: noisy
+→ number, text to search, n/p pages, s sort, ? help, enter stays: noisy
  79 noisycity-api-blueprint
 … 1-1 of 1 matching "noisy" · end
-→ number, text to search, n next, p back, ? help, enter stays: 79
+→ number, text to search, n/p pages, s sort, ? help, enter stays: 79
 /home/you/repos/github/smart-home/noisycity-api-blueprint
 ```
 
@@ -252,6 +283,10 @@ is not part of a bare basename.
 Numbers survive all of it. Filtering and paging move a window over the ranking
 rather than renumbering it, so `79` means the same repository on the first screen,
 inside a search, on page four, and via `lsrecent path 79` tomorrow.
+
+`s` is the one exception, and openly so: a number is a position in *a* ranking, so
+re-ordering makes a new one. It prints a fresh listing above the prompt — the way
+running the command again would — and says `renumbered` while doing it.
 
 It stays line-oriented rather than becoming a full-screen application, which is a
 deliberate trade. The premise of the tool is that the listing lands in your
@@ -431,9 +466,67 @@ case where you want the *no-argument* listing unmodified.
 
 `repos` and `today` / `yesterday` mean different things by recency, deliberately.
 
-**`repos` uses activity**: the newest of the repo directory's mtime, `.git`'s
-mtime, and any recorded visit. `.git` is included because commits, checkouts and
-fetches leave the worktree directory's own mtime untouched.
+**`repos` uses activity**: the newest of three signals —
+
+| Signal | Means |
+| --- | --- |
+| a recorded visit | you opened it. The only direct evidence there is |
+| the repo directory's mtime | a file was added or removed at the top level |
+| `.git/logs/HEAD`'s mtime | HEAD moved: a commit, checkout, merge, pull or reset |
+
+The reflog rather than `.git` itself, which is what this used until 1.11.0 and
+which turned out to mean almost nothing. **A directory's mtime moves when an entry
+inside it is created or removed**, so every lock file, every `gc.log`, every temp
+file any tool writes next to the index counts as "I worked here" — and one command
+run across the whole tree makes all of them today's. Measured here on 2026-08-08,
+a single sweep had moved the `.git` mtime of **300 of 303** repos while the
+worktree mtime had moved for 14 and `logs/HEAD` for 15. *TODAY* had three hundred
+repositories in it, which is the same as having none.
+
+`.git/index` is excluded for a weaker version of the same reason — `git status`
+rewrites it, 66 repos that day — and `.git/FETCH_HEAD` because a fetch is not work,
+and `git fetch` run across every repo is precisely the sweep this is trying not to
+be fooled by. A `pull` moves HEAD and is caught by the reflog regardless.
+
+### When something touches everything at once
+
+The three signals above are as honest as the filesystem gets, but a mass `git
+pull`, a restore from backup or a tree-wide `chmod` can still date every repo to
+the same instant, and no per-repo signal can tell that apart from a very busy day.
+The shape of it can: **a calendar day whose *inferred* dates cover more than half
+of all repos is treated as a bulk touch.** Those dates are discarded, the repos
+land in an *UNDATED* bucket at the bottom instead of *TODAY*, and the listing says
+so:
+
+```
+━━ UNDATED ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ 21 android-unroot   22 Cloud-Mounts   23 Dev-Env-Sweeper  ...
+↯ 287 repos dated only by a bulk touch on 2026-08-08 — UNDATED, not recent
+  work · `lsrecent noise remove 2026-08-08` trusts that day again
+```
+
+**Visit-log dates are never discarded**, which is what makes the rule safe: a
+command run across every repo opens none of them, so a day you genuinely spent in
+fifty repositories is not at risk, and a repo caught in the sweep that you *did*
+open that day is dated by the visit and stays in *TODAY*. Suppression falls on the
+signal, not on the repository.
+
+*UNDATED* is honest rather than convenient: the sweep destroyed the information,
+so the answer is "no longer known", not a guess. It sorts last and is therefore the
+first bucket [the fold](#one-screenful-by-default) drops.
+
+```bash
+lsrecent noise                    # what is suppressed, and why
+lsrecent noise add                # today was a sweep — I know, you did not
+lsrecent noise add 2026-07-30     # some other day
+lsrecent noise remove 2026-08-08  # no it wasn't; trust that day again
+export LSRECENT_NOISE_PCT=70      # a stricter threshold (0 disables the rule)
+```
+
+`noise remove` records the day as *trusted* rather than merely deleting it,
+because an auto-detected day would otherwise be re-detected on the next listing.
+The list is `${XDG_CONFIG_HOME:-~/.config}/lsrecent/noisy-days` — one `YYYY-MM-DD`
+per line, `!YYYY-MM-DD` for a trusted one.
 
 **`today` uses only the visit log** — literally the repos you `cd`'d into today.
 mtime cannot answer that question: entering a repo touches nothing, and editing
@@ -563,6 +656,8 @@ rules out aliases.
 /home/you/Documents/projects
 /mnt/archive/clients
 ```
+
+`${XDG_CONFIG_HOME:-~/.config}/lsrecent/noisy-days` — created on first `noise add` or `noise remove`. Same shape, one `YYYY-MM-DD` per line, `!YYYY-MM-DD` for a day that must never be auto-suppressed. See [When something touches everything at once](#when-something-touches-everything-at-once).
 
 Plain text rather than JSON because a pure-bash tool shouldn't need `jq` or Python to read its own state, and the file stays trivially hand-editable, greppable, and dotfile-manager-friendly. The CLI is the intended interface; manual edits are equally valid.
 

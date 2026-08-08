@@ -1,3 +1,44 @@
+lsrecent (1.11.0) unstable; urgency=low
+
+  * A repository's date no longer comes from the mtime of its `.git` directory,
+    which meant almost nothing. A directory's mtime moves when an entry inside it
+    is created or removed, so every lock file, every `gc.log` and every temp file
+    any tool writes next to the index counted as work — and one command run across
+    the tree made all of them today's. Measured on 2026-08-08, a single sweep had
+    moved the `.git` mtime of 300 of 303 repos while the worktree mtime had moved
+    for 14; TODAY held three hundred repositories, which is the same as holding
+    none. The signals are now the worktree mtime and `.git/logs/HEAD` — a commit,
+    checkout, merge, pull or reset — plus the visit log as before. `.git/index` is
+    excluded because `git status` rewrites it, and `.git/FETCH_HEAD` because a
+    fetch is not work and a tree-wide fetch is exactly the sweep being guarded
+    against; a pull moves HEAD and is caught by the reflog anyway.
+  * A calendar day whose inferred dates cover more than half of all repos is now
+    treated as a bulk touch: those dates are discarded, the repos land in a new
+    UNDATED bucket at the bottom rather than in TODAY, and a footer says so and
+    how to undo it. The threshold is $LSRECENT_NOISE_PCT (0 disables the rule).
+    Visit-log dates are never discarded, which is what makes this safe — a sweep
+    opens nothing, so a genuinely busy day is not at risk, and a repo caught in
+    the sweep that you did open is dated by the visit and stays in TODAY.
+  * `lsrecent noise` says what is being suppressed and why; `noise add [day]`
+    names one the rule missed, `noise remove <day>` one it caught wrongly. Remove
+    records the day as trusted rather than deleting it, since an auto-detected day
+    would otherwise be re-detected on the next listing. The list lives in
+    $XDG_CONFIG_HOME/lsrecent/noisy-days.
+  * A third order inside a bucket: `--activity` (`-A`) ranks by how many times the
+    visit log recorded the repo being opened inside that bucket's own day, so the
+    day you dipped into forty repositories and worked in four shows the four
+    first. Ties fall to the name, so a bucket nobody visited looks exactly as it
+    does under `--name`. LSRECENT_SORT now takes name, activity or time.
+  * `s` at the prompt cycles the order — name, activity, time — without leaving
+    the listing. It re-prints rather than re-ordering in place, and says
+    "renumbered", because a number is a position in a ranking and changing the
+    order makes a new one.
+  * One `sort` for the whole listing instead of one per bucket, which is nine
+    forks on a normal listing. This runs on every bare `ls` in a repo-grouping
+    directory, and now on every press of `s` as well.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Sat, 08 Aug 2026 20:15:00 +0300
+
 lsrecent (1.10.0) unstable; urgency=low
 
   * `p` is now a real previous page rather than a jump back to the top, and `n`

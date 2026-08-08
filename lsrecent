@@ -20,9 +20,28 @@
 # repo has one timestamp, so it appears under exactly one of them.
 #
 # Ordering. Groups run newest-first and that is where the recency lives. Within a
-# group repos are listed alphabetically, so a bucket can be scanned for a name you
-# already have in mind. `--time` (`-t`) sorts a group newest-first instead,
-# `--name` (`-n`) is the default; LSRECENT_SORT=time makes --time the default.
+# group the order is one of three, and `s` at the prompt cycles between them
+# without leaving the listing:
+#   --name     (-n)  alphabetical — the default; a bucket you scan for a name you
+#                    already have in mind
+#   --activity (-A)  busiest first — how many times the visit log recorded you
+#                    opening it inside that bucket's own day. The day you touched
+#                    forty repos becomes the four you actually worked in.
+#   --time     (-t)  newest first, the order the buckets are built in
+# LSRECENT_SORT=name|activity|time sets the default.
+#
+# Bulk touches. A repo's date is inferred from the filesystem when the visit log
+# has nothing newer, and one command run across every repo — a mass fetch, a
+# permissions sweep, a backup — dates them all to that moment and empties the
+# listing of meaning. So a calendar day whose *inferred* dates cover more than
+# LSRECENT_NOISE_PCT (default 50) of all repos is treated as a bulk touch: those
+# dates are discarded, the repos land in UNDATED rather than TODAY, and a footer
+# says so. Visit-log dates are never discarded — a bulk command opens nothing.
+#   lsrecent noise           What is being suppressed, and why
+#   lsrecent noise add [day] Suppress a day by hand (default: today)
+#   lsrecent noise remove <day>
+#                            Trust it again, auto-detected or not
+# LSRECENT_NOISE_PCT=0 turns the automatic half off and leaves only the list.
 #
 # Choosing an entry. Repo listings are numbered straight down the listing — 1 is
 # the first repo of the newest group — and end with a prompt: type a number,
@@ -42,6 +61,7 @@
 #   n  or +   next page                 p  or -   previous page
 #   t         back to the top of this view
 #   a         everything in this view, unpaged
+#   s         cycle the order inside each group: name → activity → time
 #   ?         the same summary          enter, q, ctrl-d   stay put
 #
 # The prompt needs the shell half of the pair to be current: shell-init exports
@@ -76,17 +96,19 @@
 #                                eval "$(lsrecent shell-init)"
 #
 # Config lives in ${XDG_CONFIG_HOME:-~/.config}/lsrecent/dirs — one absolute
-# path per line. The visit log lives in
+# path per line, and .../lsrecent/noisy-days — one YYYY-MM-DD per line, `!` in
+# front of a day meaning "never suppress this one". The visit log lives in
 # ${XDG_DATA_HOME:-~/.local/share}/lsrecent/opened.log — "<epoch>\t<path>", and
 # the last listing's numbering in .../lsrecent/last-list — "<n>\t<path>".
 #
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.10.0"
+VERSION="1.11.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
+noise_file="$config_dir/noisy-days"
 state_dir="${XDG_DATA_HOME:-$HOME/.local/share}/lsrecent"
 visit_log="$state_dir/opened.log"
 sel_map="$state_dir/last-list"
@@ -301,6 +323,115 @@ cmd_edit() {
 }
 
 # ---------------------------------------------------------------------------
+# Bulk-touch days
+#
+# The list is two-sided on purpose. `noise add` names a day the automatic rule
+# missed — a sweep that hit a third of the repos is still a sweep, and only you
+# know it was one. `noise remove` names one it caught wrongly, and has to keep
+# saying so: an auto-detected day would be re-detected on every listing, so the
+# entry is recorded as `!day` — trusted — rather than merely deleted.
+# ---------------------------------------------------------------------------
+
+declare -A noise_forced=()   # days the list says to suppress
+declare -A noise_trusted=()  # days the list says never to suppress
+
+load_noise_config() {
+    noise_forced=(); noise_trusted=()
+    [[ -f "$noise_file" ]] || return 0
+    local line
+    while IFS= read -r line; do
+        line=${line%%#*}
+        line=${line//[[:space:]]/}
+        [[ -n "$line" ]] || continue
+        if [[ "$line" == '!'* ]]; then
+            noise_trusted[${line#!}]=1
+        else
+            noise_forced[$line]=1
+        fi
+    done < "$noise_file"
+    return 0
+}
+
+# Rewrite the list with $1 removed from both sides, then append $2 if given.
+# Whole-file rewrite rather than an append: `add` after `remove` of the same day
+# has to drop the `!` line, or the two would contradict each other and the last
+# one read would win silently.
+write_noise_config() {
+    local drop=$1 add=${2:-} day
+    mkdir -p "$config_dir"
+    local tmp; tmp=$(mktemp "${noise_file}.XXXXXX") || die "cannot write $noise_file"
+    {
+        echo "# lsrecent bulk-touch days: one YYYY-MM-DD per line, whose inferred"
+        echo "# timestamps are ignored. \`!YYYY-MM-DD\` is the opposite — never"
+        echo "# suppress that day, however many repos share it."
+        for day in "${!noise_forced[@]}"; do
+            [[ "$day" == "$drop" ]] && continue
+            echo "$day"
+        done | sort
+        for day in "${!noise_trusted[@]}"; do
+            [[ "$day" == "$drop" ]] && continue
+            echo "!$day"
+        done | sort
+        [[ -n "$add" ]] && echo "$add"
+    } > "$tmp"
+    mv -f "$tmp" "$noise_file"
+}
+
+cmd_noise() {
+    local action=${1:-list} day=${2:-}
+    load_noise_config
+
+    case "$action" in
+        list|"")
+            local shown=0 d
+            if (( ${#noise_forced[@]} )); then
+                echo "suppressed by hand:"
+                printf '  %s\n' "${!noise_forced[@]}" | sort
+                shown=1
+            fi
+            if (( ${#noise_trusted[@]} )); then
+                echo "trusted, never auto-suppressed:"
+                printf '  %s\n' "${!noise_trusted[@]}" | sort
+                shown=1
+            fi
+
+            # The interesting half is what the automatic rule is doing right now,
+            # and that is only knowable by running the scan.
+            local root; root=$(default_root)
+            load_visits
+            if collect_repos "$root"; then
+                if (( noise_total )); then
+                    echo "detected under $root (over ${LSRECENT_NOISE_PCT:-50}% of ${noise_repo_total} repos share a day):"
+                    for d in "${!noise_suppressed[@]}"; do
+                        printf '  %s — %d repos, listed as UNDATED\n' "$d" "${noise_suppressed[$d]}"
+                    done
+                    shown=1
+                elif (( ${#noise_forced[@]} == 0 )); then
+                    echo "nothing suppressed under $root"
+                    shown=1
+                fi
+            fi
+            (( shown )) || echo "nothing suppressed, nothing trusted"
+            ;;
+        add)
+            [[ -n "$day" ]] || printf -v day '%(%F)T' -1
+            [[ "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "not a YYYY-MM-DD day: $day"
+            write_noise_config "$day" "$day"
+            echo "lsrecent: $day is a bulk touch — its inferred timestamps are ignored"
+            ;;
+        remove|rm)
+            [[ -n "$day" ]] || die "which day? (YYYY-MM-DD)"
+            [[ "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die "not a YYYY-MM-DD day: $day"
+            write_noise_config "$day" "!$day"
+            echo "lsrecent: $day is trusted again, however many repos share it"
+            ;;
+        *)
+            die "unknown noise command: $action (list, add, remove)"
+            ;;
+    esac
+}
+
+# ---------------------------------------------------------------------------
 # Visit log
 #
 # mtime answers "when did this change", not "when did I open it" — cd-ing into
@@ -342,9 +473,16 @@ cmd_prune() {
 }
 
 declare -A opened_ts=()
+# Every visit, not just the newest: "how often" is a different question from
+# "when last", and the activity sort asks the first one. Kept as a space-joined
+# string per path because bash has no array of arrays; the log is compacted at
+# PRUNE_THRESHOLD, so this is bounded by that rather than by how long the log has
+# existed. Note that prune keeps one line per repo, so counts only distinguish
+# repos within the un-pruned tail — which is the window the sort cares about.
+declare -A visit_times=()
 
 load_visits() {
-    opened_ts=()
+    opened_ts=(); visit_times=()
     [[ -f "$visit_log" ]] || return 0
     local lines
     lines=$(wc -l < "$visit_log" 2>/dev/null) || lines=0
@@ -353,6 +491,7 @@ load_visits() {
     while IFS=$'\t' read -r t p; do
         [[ -n "$p" && "$t" =~ ^[0-9]+$ ]] || continue
         (( t > ${opened_ts[$p]:-0} )) && opened_ts[$p]=$t
+        visit_times[$p]+="$t "
     done < "$visit_log"
 }
 
@@ -369,38 +508,119 @@ default_root() {
 }
 
 declare -A repo_ts=()
+# Repos whose only date came from a day ruled a bulk touch. They keep a place in
+# the listing — dropping a repo because its date is untrustworthy would be worse
+# than mis-dating it — with repo_ts 0, which buckets them under UNDATED.
+declare -A repo_undated=()
+# "YYYY-MM-DD" -> how many repos that day cost, for the footer and `noise list`.
+declare -A noise_suppressed=()
+noise_total=0
+noise_repo_total=0
 
-# Populates repo_ts[abs_path] = best-known "last touched" epoch, which is the
-# newest of: the recorded visit, the repo directory's mtime, and .git's mtime
-# (the last catches commits, checkouts and fetches that leave the worktree
-# directory itself untouched).
+# Populates repo_ts[abs_path] = best-known "last touched" epoch, the newest of:
+#
+#   the recorded visit          you opened it — the only direct evidence
+#   the repo directory's mtime  a file was added or removed at the top level
+#   .git/logs/HEAD's mtime      HEAD moved: a commit, checkout, merge, pull, reset
+#
+# Deliberately NOT the mtime of the .git directory itself, which is what this
+# used until 1.11.0. A directory's mtime moves when an entry inside it is created
+# or removed, so every lock file, every `gc.log`, every temp file any tool writes
+# next to the index counts as "I worked here" — and a command run across every
+# repo makes all of them today's. Measured on this machine on 2026-08-08, a single
+# sweep at 18:59 had moved the .git mtime of 300 of 303 repos while the worktree
+# mtime had moved for 14 and logs/HEAD for 15.
+#
+# Also deliberately not .git/index, which `git status` rewrites — 66 repos on that
+# same day — nor .git/FETCH_HEAD: a fetch is not work, and `git fetch` run across
+# every repo is precisely the sweep this is trying not to be fooled by. A pull
+# moves HEAD and is caught by the reflog regardless.
 collect_repos() {
     local root=$1
     local depth=${LSRECENT_REPO_DEPTH:-4}
-    repo_ts=()
+    repo_ts=(); repo_undated=(); noise_suppressed=(); noise_total=0
 
     # -mindepth 2 skips "$root/.git", so a root that is itself a repo is not
     # listed among the repos under it. It also keeps every emitted path strictly
     # below $root, which is what sorted_repos' prefix strip assumes.
-    local ts path
-    while IFS=$'\t' read -r ts path; do
-        [[ -n "$path" ]] || continue
-        ts=${ts%.*}
-        (( ts > ${repo_ts[$path]:-0} )) && repo_ts[$path]=$ts
-    done < <(find "$root" -mindepth 2 -maxdepth "$depth" -name .git -prune \
-                  -printf '%T@\t%h\n' 2>/dev/null)
-
-    (( ${#repo_ts[@]} )) || return 1
-
+    #
+    # find emits both paths it wants stat'd per repo and they go straight down a
+    # pipe, never through a bash array: this is the hot path — it runs on every
+    # bare `ls` in a repo-grouping directory — and materialising six hundred paths
+    # only to expand them back out as arguments costs more than the stat does.
+    # xargs also keeps the argument list bounded, which one `stat` argv would not:
+    # two paths per repo reaches ARG_MAX in the tens of thousands of repos, and
+    # the failure there looks like nothing rather than like an error, since stat's
+    # complaint goes to a suppressed stderr and every repo comes back undated.
+    #
+    # A missing reflog — a repo with no commits — simply produces no line, and the
+    # worktree mtime stands alone. The worktree line always arrives, so counting
+    # those counts the repos.
+    local -A inferred=()
     local m p
     while IFS='|' read -r m p; do
         [[ -n "$p" ]] || continue
-        (( m > ${repo_ts[$p]:-0} )) && repo_ts[$p]=$m
-    done < <(stat -c '%Y|%n' -- "${!repo_ts[@]}" 2>/dev/null)
+        if [[ "$p" == */.git/logs/HEAD ]]; then
+            p=${p%/.git/logs/HEAD}
+        else
+            (( noise_repo_total++ ))
+        fi
+        (( m > ${inferred[$p]:-0} )) && inferred[$p]=$m
+    done < <(find "$root" -mindepth 2 -maxdepth "$depth" -name .git -prune \
+                  -printf '%h\0%h/.git/logs/HEAD\0' 2>/dev/null \
+             | xargs -0 stat -c '%Y|%n' -- 2>/dev/null)
+
+    (( noise_repo_total )) || return 1
+
+    # Which calendar days are bulk touches. Counted over inferred dates only: the
+    # visit log records what you opened, and a command run across every repo opens
+    # nothing, so a day you genuinely spent in fifty repos is not at risk here.
+    local pct=${LSRECENT_NOISE_PCT:-50}
+    [[ "$pct" =~ ^[0-9]+$ ]] || die "LSRECENT_NOISE_PCT must be a number: $pct"
+    local -A day_count=()
+    local day
+    for p in "${!inferred[@]}"; do
+        printf -v day '%(%F)T' "${inferred[$p]}"
+        (( day_count[$day]++ ))
+    done
+    load_noise_config
+    local limit=0
+    (( pct > 0 )) && limit=$(( noise_repo_total * pct / 100 ))
+    local -A noisy=()
+    for day in "${!day_count[@]}"; do
+        (( limit > 0 && day_count[$day] > limit )) || continue
+        [[ -v noise_trusted[$day] ]] && continue
+        noisy[$day]=1
+    done
+    for day in "${!noise_forced[@]}"; do
+        noisy[$day]=1
+    done
+
+    local -A quarantined=()
+    for p in "${!inferred[@]}"; do
+        printf -v day '%(%F)T' "${inferred[$p]}"
+        if [[ -v noisy[$day] ]]; then
+            quarantined[$p]=$day
+        else
+            repo_ts[$p]=${inferred[$p]}
+        fi
+    done
 
     for p in "${!opened_ts[@]}"; do
-        [[ -v repo_ts[$p] ]] || continue
-        (( opened_ts[$p] > repo_ts[$p] )) && repo_ts[$p]=${opened_ts[$p]}
+        [[ -v inferred[$p] ]] || continue
+        (( opened_ts[$p] > ${repo_ts[$p]:-0} )) && repo_ts[$p]=${opened_ts[$p]}
+    done
+
+    # A quarantined repo you also opened that day is dated by the visit and is not
+    # undated at all — which is the point of suppressing the signal rather than the
+    # repo. Only what the sweep was the sole evidence for ends up here.
+    for p in "${!quarantined[@]}"; do
+        [[ -v repo_ts[$p] ]] && continue
+        repo_undated[$p]=1
+        repo_ts[$p]=0
+        day=${quarantined[$p]}
+        (( noise_suppressed[$day]++ ))
+        (( noise_total++ ))
     done
 
     # Explicit: without it the function returns the status of the arithmetic
@@ -729,6 +949,7 @@ ${C_HINT}  23        cd into entry 23 — numbers are the ranking, not the page
   n  or +   next page              p  or -   previous page
   t         back to the top of this view
   a         everything in this view, unpaged
+  s         order inside each group: name → activity → time (now: $(sort_label))
   ?         this          enter, q or ctrl-d    stay put${C_OFF}
 EOF
 }
@@ -742,7 +963,7 @@ browse() {
     view_from=$sel_shown
 
     while :; do
-        printf "${C_HINT}→ number, text to search, n next, p back, ? help, enter stays: ${C_OFF}" \
+        printf "${C_HINT}→ number, text to search, n/p pages, s sort, ? help, enter stays: ${C_OFF}" \
             > /dev/tty
         # A bare `read` with no reply (EOF from ctrl-d) leaves the cursor mid-line.
         IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
@@ -780,6 +1001,26 @@ browse() {
                 view_from=0; render_page; continue ;;
             a|A|all)
                 view_from=0; render_page unlimited; continue ;;
+            s|S|sort)
+                # Re-print rather than re-order in place. A listing's numbers are
+                # its own — 23 means the 23rd of *this* ranking — so changing the
+                # order has to produce a new listing, above the prompt, the way
+                # running the command again would. Cheap, too: the buckets are
+                # already built, so nothing is stat'd or read a second time.
+                case "$sort_mode" in
+                    name)     sort_mode=activity ;;
+                    activity) sort_mode=time ;;
+                    *)        sort_mode=name ;;
+                esac
+                printf "${C_HINT}within each group: %s — renumbered${C_OFF}\n" \
+                    "$(sort_label)"
+                render_listing
+                build_view
+                # An unfiltered view continues below the screenful just printed,
+                # as it does on entry; a filtered one has its own first result and
+                # nothing above the prompt to continue from.
+                if [[ -n "$view_filter" ]]; then render_page; else view_from=$sel_shown; fi
+                continue ;;
             /)
                 view_filter=''; build_view; render_page; continue ;;
         esac
@@ -845,7 +1086,7 @@ cmd_show() {
         case "$1" in
             # Only meaningful when this delegates to cmd_repos below; a directory
             # listed as its own children is laid out by `ls`, which has its own.
-            --all|-a|--time|-t|--name|-n) passthru+=("$1") ;;
+            --all|-a|--time|-t|--name|-n|--activity|-A) passthru+=("$1") ;;
             -*)       die "unknown option: $1" ;;
             *)        target=$1 ;;
         esac
@@ -921,42 +1162,53 @@ cmd_show() {
 # Grouped listing — repository level
 # ---------------------------------------------------------------------------
 
-cmd_repos() {
-    local want_window="" full=0 no_limit=0 root="" by_name=1
-    # Set before the loop, so an explicit flag on the command line still wins.
-    [[ "${LSRECENT_SORT:-}" != time ]] || by_name=0
-    while (( $# )); do
-        case "$1" in
-            --today)     want_window=today ;;
-            --yesterday) want_window=yesterday ;;
-            --full)      full=1 ;;
-            --all|-a)    no_limit=1 ;;
-            --time|-t)   by_name=0 ;;
-            --name|-n)   by_name=1 ;;
-            -*)          die "unknown option: $1" ;;
-            *)           root=$1 ;;
-        esac
-        shift
-    done
-    set_window "$want_window"
-    [[ -n "$root" ]] || root=$(default_root)
-    root=$(resolve "$root") || die "no such directory: $root"
-    [[ -d "$root" ]] || die "not a directory: $root"
+# Buckets, and the listing state the browser needs to print the listing again in
+# a different order. Global rather than local to cmd_repos because `s` at the
+# prompt re-renders, and re-rendering has to start from the buckets as they were
+# built — newest-first — not from whatever order the last render left them in.
+declare -a g_today=() g_yest=() g_d2=() g_d3=() g_d4=() g_d5=() g_d6=() g_d7=() \
+           g_month=() g_quarter=() g_older=() g_undated=()
 
-    load_visits
-    collect_repos "$root" || die "no git repositories under $root"
+declare -a group_labels=("TODAY" "YESTERDAY" \
+                         "2 DAYS AGO" "3 DAYS AGO" "4 DAYS AGO" \
+                         "5 DAYS AGO" "6 DAYS AGO" "7 DAYS AGO" \
+                         "PAST MONTH" "PAST 3 MONTHS" "OLDER" "UNDATED")
+# The six numbered-day buckets deliberately share one colour. The header colour
+# says how recent, coarsely — green is now, grey is history — and all six are
+# "this week"; the label is what distinguishes them, and six shades of cyan would
+# only invite reading a precision into the colour that is not there. UNDATED is
+# grey with OLDER because it is the same kind of answer: not what you want.
+declare -a group_colors=(92 32 96 96 96 96 96 96 93 95 90 90)
+declare -a group_vars=(g_today g_yest g_d2 g_d3 g_d4 g_d5 g_d6 g_d7 \
+                       g_month g_quarter g_older g_undated)
+# Where each bucket's activity count starts. A day bucket counts visits inside
+# that day, which is what makes "busiest" mean the same thing in every row of the
+# listing; the coarse buckets have no single day to count, so they count the whole
+# log and rank by how often you go back to the thing at all.
+declare -a group_cutoff=()
 
-    local cols; cols=$(term_cols)
+# Order within a bucket: name, activity or time.
+sort_mode=name
+
+lr_root=""
+lr_cols=80
+lr_no_limit=0
+
+# Fill the buckets from repo_ts, newest-first within each. Entries are
+# "display<TAB>abspath": the display name drops the topic folder unless --full,
+# but the number has to resolve to a real path, and sorted_repos yields paths
+# relative to root.
+bucket_repos() {
+    local root=$1 full=$2
+    g_today=(); g_yest=(); g_d2=(); g_d3=(); g_d4=(); g_d5=(); g_d6=(); g_d7=()
+    g_month=(); g_quarter=(); g_older=(); g_undated=()
+
     local now midnight
     now=$(now_epoch)
     midnight=$(midnight_epoch)
     day_midnights "$midnight"
+    group_cutoff=("${day_mid[@]}" 0 0 0 0)
 
-    # Entries are "display<TAB>abspath": the display name drops the topic folder
-    # unless --full, but the number has to resolve to a real path, and sorted_repos
-    # yields paths relative to root.
-    local g_today=() g_yest=() g_d2=() g_d3=() g_d4=() g_d5=() g_d6=() g_d7=() \
-          g_month=() g_quarter=() g_older=()
     local ts rel name entry age_days
     local opened_only=0; [[ -n "$window" ]] && opened_only=1
     while IFS=$'\t' read -r ts rel; do
@@ -972,7 +1224,8 @@ cmd_repos() {
         # newest timestamp, so it lands in exactly one bucket. With a window set
         # every entry falls in a single bucket anyway, and the group loop below
         # prints just that one.
-        if   (( ts >= day_mid[0] )); then g_today+=("$entry")
+        if   (( ts == 0 ));          then g_undated+=("$entry")
+        elif (( ts >= day_mid[0] )); then g_today+=("$entry")
         elif (( ts >= day_mid[1] )); then g_yest+=("$entry")
         elif (( ts >= day_mid[2] )); then g_d2+=("$entry")
         elif (( ts >= day_mid[3] )); then g_d3+=("$entry")
@@ -991,64 +1244,126 @@ cmd_repos() {
             fi
         fi
     done < <(sorted_repos "$root" "$opened_only")
+    return 0
+}
+
+# How many times the visit log recorded this repo being opened since $1. Sets
+# `activity` rather than echoing it: this is called once per entry, and a command
+# substitution there is a fork per repo.
+activity=0
+activity_since() {
+    local cutoff=$1 path=$2 t
+    activity=0
+    for t in ${visit_times[$path]:-}; do
+        (( t >= cutoff )) && (( activity++ ))
+    done
+    return 0
+}
+
+# The whole listing in display order: every bucket's entries, ordered within the
+# bucket by sort_mode, laid end to end, with each bucket's slice recorded rather
+# than copied into an array of its own. The buckets themselves are left alone, so
+# `s` can re-order from the original newest-first order however many times it is
+# pressed.
+declare -a ord_entries=()
+declare -a ord_start=()
+declare -a ord_count=()
+
+# One `sort` for the listing rather than one per bucket. Nine forks on a normal
+# listing is the difference between this being free and this being felt: it runs
+# on every bare `ls` in a repo-grouping directory, and now on every press of `s`
+# as well. The bucket index leads the sort key, so a single pass cannot mix two
+# buckets together however the rest of the key compares.
+#
+# Key: bucket, then score descending, then the display label case-folded. The
+# label, never the whole line — the path after it would otherwise decide ties by
+# topic folder, so two repos with the same name would sort apart from where their
+# names put them. (Under --full the label *is* topic/repo and sorts by topic
+# anyway.) Ties falling to the name is what makes the busiest-first view of a
+# bucket nobody visited identical to the alphabetical one, rather than an
+# arbitrary order that changes between listings.
+order_listing() {
+    ord_entries=(); ord_start=(); ord_count=()
+    local i ref e n=0
+
+    if [[ "$sort_mode" == time ]]; then
+        # Already newest-first, which is the order the buckets were built in.
+        for i in "${!group_vars[@]}"; do
+            ref="${group_vars[$i]}[@]"
+            local -a grp=("${!ref}")
+            ord_start[$i]=$n
+            ord_count[$i]=${#grp[@]}
+            (( ${#grp[@]} )) && ord_entries+=("${grp[@]}")
+            n=$(( n + ${#grp[@]} ))
+        done
+        return 0
+    fi
+
+    local -a flat=()
+    mapfile -t flat < <(
+        for i in "${!group_vars[@]}"; do
+            ref="${group_vars[$i]}[@]"
+            for e in "${!ref}"; do
+                if [[ "$sort_mode" == activity ]]; then
+                    activity_since "${group_cutoff[$i]}" "${e#*$'\t'}"
+                else
+                    activity=0
+                fi
+                printf '%s\t%s\t%s\n' "$i" "$activity" "$e"
+            done
+        done | sort -t$'\t' -k1,1n -k2,2nr -k3,3f
+    )
+
+    # Back into slices. The stream is already grouped by bucket, so this is one
+    # walk: a change of bucket index closes the previous slice.
+    for i in "${!group_vars[@]}"; do
+        ord_start[$i]=0
+        ord_count[$i]=0
+    done
+    for e in "${flat[@]}"; do
+        i=${e%%$'\t'*}
+        (( ord_count[$i] )) || ord_start[$i]=$n
+        (( ord_count[$i]++ ))
+        e=${e#*$'\t'}         # bucket index
+        ord_entries+=("${e#*$'\t'}")   # score
+        (( n++ ))
+    done
+    return 0
+}
+
+sort_label() {
+    case "$sort_mode" in
+        time)     echo "most recent first" ;;
+        activity) echo "most visits first" ;;
+        *)        echo "name" ;;
+    esac
+}
+
+# Print the listing. Everything above this is what the listing is *of*; this is
+# the part that runs again when the order changes, so it owns all the numbering
+# state and resets it on entry.
+render_listing() {
+    local cols=$lr_cols
+    sel_paths=(); sel_names=(); sel_n=0; sel_total=0; sel_shown=0
+
+    order_listing
+    sel_total=${#ord_entries[@]}
+
+    local budget=0
+    (( lr_no_limit )) || budget=$(row_budget)
 
     # Print oldest-group-last, stopping when the screen is full. The groups run
     # newest-first, so cutting from the end drops the least interesting buckets
     # whole, and a truncated listing is still the right answer to "what was I
     # working on recently?". Only the bucket at the fold is cut part-way, and
-    # there the cut falls where the within-group order puts it — by name, unless
-    # --time. That is survivable because everything cut is still numbered and the
-    # prompt can search or page to it; before that was true this had to cut by
-    # age.
-    local -a group_labels=("TODAY" "YESTERDAY" \
-                           "2 DAYS AGO" "3 DAYS AGO" "4 DAYS AGO" \
-                           "5 DAYS AGO" "6 DAYS AGO" "7 DAYS AGO" \
-                           "PAST MONTH" "PAST 3 MONTHS" "OLDER")
-    # The six numbered-day buckets deliberately share one colour. The header colour
-    # says how recent, coarsely — green is now, grey is history — and all six are
-    # "this week"; the label is what distinguishes them, and six shades of cyan
-    # would only invite reading a precision into the colour that is not there.
-    local -a group_colors=(92 32 96 96 96 96 96 96 93 95 90)
-    local -a group_vars=(g_today g_yest g_d2 g_d3 g_d4 g_d5 g_d6 g_d7 \
-                         g_month g_quarter g_older)
-
-    # Order within a bucket. The buckets carry the recency — that is the whole
-    # point of grouping — so members of one are peers, and sorting them by name
-    # instead makes the group scannable for a repo you already have in mind
-    # rather than a list you have to read from the top every time. `--time`
-    # restores the newest-first order the buckets are built in.
-    #
-    # Sorting on field 1 only (the display label, case-folded), never the whole
-    # line: the path after the tab would otherwise decide ties by topic folder,
-    # so two repos with the same name would sort apart from where their names put
-    # them. Under --full the label *is* topic/repo and sorts by topic anyway.
-    #
-    # The same pass totals the listing, since it already visits every group: with a
-    # bucket per day there are eleven of them, and an eleven-term sum written out is
-    # a place for a bucket to be forgotten when the next one is added.
-    local gv gref
-    sel_total=0
-    for gv in "${group_vars[@]}"; do
-        gref="$gv[@]"
-        local -a members=("${!gref}")
-        sel_total=$(( sel_total + ${#members[@]} ))
-        (( by_name )) || continue
-        (( ${#members[@]} > 1 )) || continue
-        mapfile -t "$gv" < <(printf '%s\n' "${members[@]}" | sort -f -t$'\t' -k1,1)
-    done
-
-    local budget=0
-    (( no_limit )) || budget=$(row_budget)
-
-    local shown=0 used=0 hidden=0 i count overhead rows_needed avail take ref
+    # there the cut falls where the within-group order puts it. That is survivable
+    # because everything cut is still numbered and the prompt can search or page
+    # to it; before that was true this had to cut by age.
+    local shown=0 used=0 hidden=0 i count overhead rows_needed avail take
     for i in "${!group_vars[@]}"; do
-        # Copied out by indirect expansion rather than a nameref: a `local -n`
-        # cannot be re-pointed on the next iteration without unsetting it first,
-        # and the `continue`s below would skip that unset.
-        ref="${group_vars[$i]}[@]"
-        local -a grp=("${!ref}")
-        count=${#grp[@]}
+        count=${ord_count[$i]}
         (( count )) || continue
+        local -a grp=("${ord_entries[@]:${ord_start[$i]}:count}")
 
         # Once anything has been cut, the rest is only counted for the footer:
         # showing a later group after eliding an earlier one would misrepresent
@@ -1093,19 +1408,83 @@ cmd_repos() {
         hidden=$(( hidden + count - take ))
     done
 
-    if (( shown )); then
-        if (( hidden )); then
-            local hint="lsrepos"
-            case "$window" in
-                today)     hint="lstoday" ;;
-                yesterday) hint="lsyesterday" ;;
-            esac
-            # The elided repos are still numbered, so the footer names the range
-            # rather than only offering --all: typing 23 works from here.
-            printf "${C_HINT}… %d more, numbered %d-%d · n pages to them, %s --all prints them${C_OFF}\n" \
-                "$hidden" "$(( sel_shown + 1 ))" "$sel_n" "$hint"
-        fi
-        write_sel_map
+    (( shown )) || return 1
+
+    if (( hidden )); then
+        local hint="lsrepos"
+        case "$window" in
+            today)     hint="lstoday" ;;
+            yesterday) hint="lsyesterday" ;;
+        esac
+        # The elided repos are still numbered, so the footer names the range
+        # rather than only offering --all: typing 23 works from here.
+        printf "${C_HINT}… %d more, numbered %d-%d · n pages to them, %s --all prints them${C_OFF}\n" \
+            "$hidden" "$(( sel_shown + 1 ))" "$sel_n" "$hint"
+    fi
+    noise_footer
+    write_sel_map
+    return 0
+}
+
+# Why UNDATED has anything in it. Printed every listing that suppressed a day,
+# because a bucket of two hundred repositories with no explanation beside it is
+# the same puzzle the bulk touch was — and the way out has to be on screen, not
+# in the manual.
+noise_footer() {
+    (( noise_total )) || return 0
+    # Named by the day that cost the most repos, not by whichever the hash
+    # happened to yield first: the line offers a way to undo one day, so it has to
+    # offer the one worth undoing, and it has to name the same day twice running.
+    local day worst="" worst_n=0
+    for day in "${!noise_suppressed[@]}"; do
+        (( noise_suppressed[$day] > worst_n )) || continue
+        worst=$day; worst_n=${noise_suppressed[$day]}
+    done
+    if (( ${#noise_suppressed[@]} > 1 )); then
+        printf "${C_HINT}↯ %d repos dated only by bulk touches on %d days — UNDATED, not recent work · \`lsrecent noise\` lists them${C_OFF}\n" \
+            "$noise_total" "${#noise_suppressed[@]}"
+    else
+        printf "${C_HINT}↯ %d repos dated only by a bulk touch on %s — UNDATED, not recent work · \`lsrecent noise remove %s\` trusts that day again${C_OFF}\n" \
+            "$noise_total" "$worst" "$worst"
+    fi
+}
+
+cmd_repos() {
+    local want_window="" full=0 root=""
+    # Set before the loop, so an explicit flag on the command line still wins.
+    case "${LSRECENT_SORT:-}" in
+        time|activity|name) sort_mode=${LSRECENT_SORT} ;;
+        '')                 sort_mode=name ;;
+        *)                  die "LSRECENT_SORT must be name, activity or time: $LSRECENT_SORT" ;;
+    esac
+    lr_no_limit=0
+    while (( $# )); do
+        case "$1" in
+            --today)       want_window=today ;;
+            --yesterday)   want_window=yesterday ;;
+            --full)        full=1 ;;
+            --all|-a)      lr_no_limit=1 ;;
+            --time|-t)     sort_mode=time ;;
+            --name|-n)     sort_mode=name ;;
+            --activity|-A) sort_mode=activity ;;
+            -*)            die "unknown option: $1" ;;
+            *)             root=$1 ;;
+        esac
+        shift
+    done
+    set_window "$want_window"
+    [[ -n "$root" ]] || root=$(default_root)
+    root=$(resolve "$root") || die "no such directory: $root"
+    [[ -d "$root" ]] || die "not a directory: $root"
+
+    load_visits
+    collect_repos "$root" || die "no git repositories under $root"
+
+    lr_root=$root
+    lr_cols=$(term_cols)
+    bucket_repos "$root" "$full"
+
+    if render_listing; then
         prompt_jump
         return 0
     fi
@@ -1345,6 +1724,7 @@ case "${1:-}" in
     edit)        cmd_edit ;;
     visit)       cmd_visit "${2:-}" ;;
     prune)       load_visits; cmd_prune ;;
+    noise)       shift; cmd_noise "$@" ;;
     repos)       shift; cmd_repos "$@" ;;
     today)       shift; cmd_repos --today "$@" ;;
     yesterday|yest) shift; cmd_repos --yesterday "$@" ;;
