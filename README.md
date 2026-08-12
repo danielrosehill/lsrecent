@@ -33,7 +33,7 @@ The top of a real listing — plain `ls` in `~/repos/github`, with the shell int
 
 ![lsrecent in a terminal](docs/screenshot-terminal.png)
 
-The motivating use case: a `~/repos/github` directory with 250+ repositories filed under topic folders, where "what was I working on recently?" is the question a flat alphabetical listing cannot answer. The buckets answer it; inside a bucket the repos are alphabetical, so you can also just find the one you came for. Entries are numbered straight down the listing and it ends by asking which one you want — type the number and you are in it. See [Choosing an entry](#choosing-an-entry).
+The motivating use case: a `~/repos/github` directory with 250+ repositories filed under topic folders, where "what was I working on recently?" is the question a flat alphabetical listing cannot answer. The buckets answer it; inside a bucket the most recently opened repo is first, so the thing you were last in is line 1 — and `sn` at the prompt makes the bucket alphabetical when you are looking for a name instead. Entries are numbered straight down the listing and it ends by asking which one you want — type the number and you are in it. See [Choosing an entry](#choosing-an-entry).
 
 ## Install
 
@@ -83,8 +83,8 @@ lsrepos               # grouped view at repository level, across the whole tree
 lstoday               # only the repos you opened today
 lsyesterday           # only the repos whose last visit was yesterday
 lsrepos --all         # the whole listing, past one screenful (-a works too)
-lsrepos -A            # busiest-first within each bucket, not alphabetical
-lsrepos -t            # newest-first within each bucket
+lsrepos -A            # busiest-first within each bucket
+lsrepos -n            # alphabetical within each bucket, not most-recent-first
 
 lsrecent noise        # what a tree-wide sweep is being stopped from dating
 
@@ -161,33 +161,38 @@ Boundaries are local midnights, computed without forking `date` — see
 [Today and yesterday do not overlap](#today-and-yesterday-do-not-overlap) for how
 that survives a DST week.
 
-### Ordering: buckets by recency, names inside them
+### Ordering: buckets by recency, and recency inside them too
 
-The **buckets** run newest-first, and that is where the recency lives: *TODAY*
-before *YESTERDAY* before *2 DAYS AGO*, and a repo sits in exactly one of them.
-**Inside** a bucket the repos are listed **alphabetically** (case-insensitively).
+The **buckets** run newest-first, and that is where most of the recency lives:
+*TODAY* before *YESTERDAY* before *2 DAYS AGO*, and a repo sits in exactly one of
+them. **Inside** a bucket the default is **most recently opened first** (since
+1.12.0; it was alphabetical from 1.10.0 to 1.11.0).
 
-Sorting a bucket by recency too was the original behaviour and it sorted by a
-distinction that is not worth much: everything in a day bucket is that day's, and
-which of two of them was touched at 14:02 and which at 11:40 is not something you
-know or can predict. So the position of a name in its bucket kept moving between
-listings for reasons invisible on screen, and the only way to find a repo you
-already had in mind was to read the group top to bottom. Alphabetical, the
-position is stable and you can jump to it.
+The case for alphabetical was that a day bucket is all one day, so which of two
+repos was touched at 14:02 and which at 11:40 is a distinction you cannot predict,
+and ranking on it moves a name around between listings for reasons nothing on
+screen explains. That still holds for *PAST MONTH* and below. It does not hold for
+*TODAY*, which is the bucket the tool exists for and is read top-down: the last
+thing you were in is nearly always the thing you are going back to, and it should
+be line 1 rather than wherever its initial falls. `sn` at the prompt is one
+keystroke away when you want the alphabet back.
 
-There are three orders, and `s` at the prompt cycles between them without leaving
-the listing:
+There are three orders. `s` at the prompt cycles them, and `sr` / `sv` / `sn` jump
+straight to one, without leaving the listing:
 
-| Flag | Order inside a bucket |
-| --- | --- |
-| `--name` (`-n`) | alphabetical, case-insensitive — the default |
-| `--activity` (`-A`) | busiest first: how many times you opened it *that day* |
-| `--time` (`-t`) | newest first, the order the buckets are built in |
+| Flag | Prompt key | Order inside a bucket |
+| --- | --- | --- |
+| `--recency` (`-t`) | `sr` | most recently opened first — **the default** |
+| `--visits` (`-A`) | `sv` | busiest first: how many times you opened it *that day* |
+| `--name` (`-n`) | `sn` | alphabetical, case-insensitive |
+
+`--time` and `--activity` are the older spellings of `--recency` and `--visits`
+and still work, as do `LSRECENT_SORT=time` and `=activity`.
 
 ```bash
 lsrepos -A            # the busiest repo of each day at the top of its bucket
-lstoday -A
-export LSRECENT_SORT=activity    # ... or make that the default
+lstoday -n            # today's work, alphabetical
+export LSRECENT_SORT=name    # ... or make that the default
 ```
 
 **Activity is visits, counted inside the bucket's own day.** A day bucket ranks by
@@ -200,11 +205,11 @@ thing at all.
 
 It is deliberately a count of *visits*, not of edits or of commits: a visit is the
 one thing recorded per event rather than inferred from a timestamp, so it can be
-counted. A day you dipped into forty repositories and worked in four looks, in the
-default alphabetical order, like forty equal repositories; `-A` puts the four at
-the top. Repos with no visits that day score zero and fall to the bottom in
-alphabetical order — so a bucket nobody visited looks exactly like `-n`, rather
-than shuffling for no visible reason.
+counted. A day you dipped into forty repositories and worked in four looks, in any
+order but this one, like forty equal repositories; `-A` puts the four at the top.
+Repos with no visits that day score zero and fall to the bottom in alphabetical
+order — so a bucket nobody visited looks exactly like `-n`, rather than shuffling
+for no visible reason.
 
 `s` re-prints the listing rather than re-ordering it in place, which renumbers it:
 a number is a position in *a* ranking, and changing the order makes a new one. The
@@ -212,8 +217,8 @@ new listing prints above the prompt the way running the command again would, and
 the old one stays in the scrollback.
 
 One consequence is worth knowing: when a listing is cut to one screenful, the
-bucket at the fold is now cut alphabetically rather than by age, so what is
-missing from it is *M–Z*, not *the oldest*. Whole buckets are still dropped
+bucket at the fold is cut where the current order puts the fold — under `sn` what
+is missing from it is *M–Z* rather than *the oldest*. Whole buckets are still dropped
 oldest-first, and everything cut is still numbered and reachable from the prompt
 by search or `+` — see [One screenful by default](#one-screenful-by-default).
 
@@ -255,9 +260,16 @@ what it had just numbered. It accepts more than a number:
 | `p` or `-` | previous page |
 | `t` | back to the top of the current view |
 | `a` | everything in the current view, unpaged |
-| `s` | cycle the order inside each group: name → activity → time |
+| `s` | cycle the order inside each group: recency → visits → name |
+| `sr` / `sv` / `sn` | go straight to that order — recency, visits, name |
 | `?` | the same summary |
 | enter, `q`, ctrl-d | stay put |
+
+Every key the tool offers — here, on the prompt line, in the paging footer — is
+printed in its **own colour**, distinct from the prose describing it, and the
+order currently in force is a third colour again. A hint line is part instruction
+and part explanation; in one colour the two fuse and you have to read the sentence
+to find the character you are meant to press.
 
 A bare word searches. Nothing else a selection could be is anything but digits, so
 typing a repository name at a prompt that has just listed repository names does
@@ -415,8 +427,8 @@ is for when you want to read the names, not a precondition for reaching them.
 Truncation is sound because the groups run newest-first: cutting from the end
 drops the buckets you are least likely to want, whole. Only the bucket at the
 fold is cut part-way, and there the cut lands wherever the
-[within-group order](#ordering-buckets-by-recency-names-inside-them) puts it —
-by name, unless `--time`. Everything in that bucket is the same age anyway, and
+[within-group order](#ordering-buckets-by-recency-and-recency-inside-them-too) puts it —
+by recency, unless `-n` or `-A`. Everything in that bucket is the same age anyway, and
 nothing cut is unreachable: it is numbered, and the prompt searches and pages.
 Once anything has been cut the remaining groups are only counted, never partially
 shown — printing *OLDER* after eliding half of *PAST MONTH* would misrepresent
@@ -689,12 +701,13 @@ Because the wrapper's logic lives in the binary (`shell-init`, `check`), updatin
 - **A listing is a question.** Anything that numbers its output should be willing to take a number back, so the prompt is the default rather than a flag: the alternative is a tool that shows you the answer and then makes you retype part of it. The non-interactive path still exists for pipes and scripts, where it is the only sensible behaviour — and it is chosen by detecting that situation, not by asking the user to declare it.
 - **Forks are the entire performance story.** A fork costs ~7 ms here, and everything else this tool does is free by comparison. So there is exactly one rule: *no subprocess inside a per-entry loop.* Timestamps come from a single `find -printf`, not a `stat` per entry; the clock comes from bash's `printf '%(%s)T'`, not `date`; `check` compares the raw `$PWD` before paying for `realpath`; `COLUMNS` is passed in by the shell wrapper so the binary never forks `tput`. Measured on a 3000-entry directory: **27.9 s before, 0.15 s after.** The old code was linear in fork count, so it was fine on a 30-entry directory and unusable on a large one — if a change here makes a big directory feel slow again, count the forks first.
 - **Recency source is mtime, except where it can't be.** Access time (atime) would literally mean "last opened", but on modern Linux `relatime`/`noatime` mounts make it unreliable, and merely listing or backing up a tree can touch it. Modification time is stable and, for project directories, tracks real activity — but it cannot express "I opened this", which is why repo-level views also consult the visit log.
-- **Ordering within a bucket** is alphabetical, case-folded, on the displayed label (`--time` restores the older most-recent-first). The bucket already carries the recency; ranking its members against each other splits hairs the timestamps cannot really support and moves a name around between listings for reasons nothing on screen explains. Directory-level listings keep `ls -t` ordering, because there the bucket contents are files rather than repositories and `ls` owns that layout.
+- **Ordering within a bucket** is most-recent-first by default, with `-n` for alphabetical (case-folded, on the displayed label) and `-A` for visit count. Alphabetical was the default in 1.10–1.11 on the argument that a day bucket is all one day, so ordering inside it splits hairs the timestamps cannot support and moves a name around between listings for no visible reason. True of *PAST MONTH*; not true of *TODAY*, which is read top-down and where the last repo you opened is the one you are most likely going back to. Directory-level listings keep `ls -t` ordering, because there the bucket contents are files rather than repositories and `ls` owns that layout.
 - **Directory-level layout is delegated to `ls`** (`ls -dtC --color=always`), so you get the exact column packing and file-type colors you're used to. Repo-level layout can't be: `ls` re-sorts its operands, and repos resolve from many different parents, so that view does its own column packing against the computed order. It fills **row-major**, unlike `ls -C` — once entries are numbered, column-major would run 1, 2, 3 down the page instead of across it.
 - **`[[ -t 1 ]]` is always false inside `$(...)`** — stdout there is the pipe bash created to capture the substitution, not the terminal. A helper called as `budget=$(row_budget)` therefore cannot ask whether it is talking to a terminal; the answer is sampled once at the top level into `stdout_tty`. `tput lines` has the same problem from a different angle: it sizes the terminal from an ioctl on *its* stdout, so inside a substitution it reports terminfo's static default rather than the real height. Hence `LINES` from `shell-init`, falling back to `stty size < /dev/tty`.
 - **A bash function returns the status of its last command**, which bit this tool hard: `collect_repos` ended with an `(( a > b ))` test, so whenever a recorded visit was merely *not newer* than the repo's mtime it returned 1, and every caller's `|| die "no git repositories under $root"` fired with 255 repos sitting in the array. Any function here whose result is "did it work" ends with an explicit `return 0`.
 - **Headers** are full-width `━` rules with bold bright ANSI colors (green / cyan / yellow / magenta / gray), sized to the terminal width.
 - **The tool speaks in orange.** The footer, the prompt, the help and every message the browser prints used to be ANSI 90 — "bright black" — which on a dark terminal is the ink a theme reserves for what you are meant to skim past. The line saying how to reach the 229 repositories that did not fit is the last line that should read as decoration. Orange (256-colour 214, falling back to plain yellow where `TERM`/`COLORTERM` do not claim 256 colours) is legible on a black or a white background and collides with nothing else on screen. Entry **numbers** stay grey: there, de-emphasis is the point — they sit beside the name they belong to and only have to be readable once you are looking for one.
+- **One colour was still one too few.** Every hint the tool prints is part key and part prose — `s sort`, `n for the next 20`, `sr sort by recency` — and in a single colour the two halves fuse into a sentence you have to read to find the one character you are meant to press. Since 1.12.0 the **key** has its own ink (bright cyan, `1;38;5;51`), the prose keeps the orange, the **current setting** a key would change is bright green (`1;38;5;120`) so "which order am I in" is answerable by looking rather than reading, and separators drop to grey 244. Four roles, four colours, applied everywhere a key is offered: the prompt line, `?`, the paging footer, the truncation footer, the noise footer.
 - **The override lives in a shell function**, because changing what bare `ls` does mid-session requires shell-level logic — but the function is deliberately minimal and generated by the binary, so all real behavior stays in one place.
 
 ## License

@@ -1,3 +1,31 @@
+lsrecent (1.12.0) unstable; urgency=low
+
+  * The default order inside a bucket is most-recent-first again, not
+    alphabetical. Alphabetical (1.10.0) was argued from the coarse buckets, where
+    everything is the same age and ranking it moves names around for no visible
+    reason. TODAY is not that bucket: it is read top-down, and the last repository
+    you opened is nearly always the one you are going back to, so it belongs on
+    line 1 rather than wherever its initial falls. `sn` at the prompt restores the
+    alphabet in one keystroke.
+  * The three orders can be selected directly at the prompt as well as cycled:
+    `sr` recency, `sv` visits, `sn` name. Cycling is fine when one of three is
+    wanted; it is a guessing game when the one you want is two presses away and
+    you have to read the screen between them. `s` still cycles, now recency →
+    visits → name.
+  * `--recency` and `--visits` are the preferred spellings of `--time` and
+    `--activity`, and LSRECENT_SORT takes recency|visits|name. The old spellings
+    still work everywhere.
+  * Keys and prose no longer print in the same colour. Every hint the tool emits
+    is part instruction and part explanation — `s sort`, `n for the next 20` —
+    and in one orange the two fuse into a sentence you must read to find the one
+    character you are meant to press. The key is now bright cyan, the prose stays
+    orange, the setting a key would change is bright green, and separators are
+    grey: the prompt line, `?`, the paging footer, the truncation footer and the
+    noise footer all follow it. The `?` help also marks the order in force on the
+    row that selects it, instead of naming it elsewhere on the line.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Wed, 12 Aug 2026 22:30:00 +0300
+
 lsrecent (1.11.0) unstable; urgency=low
 
   * A repository's date no longer comes from the mtime of its `.git` directory,

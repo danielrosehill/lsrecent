@@ -19,16 +19,19 @@
 # 2 DAYS AGO through 7 DAYS AGO — and then PAST MONTH, PAST 3 MONTHS and OLDER. A
 # repo has one timestamp, so it appears under exactly one of them.
 #
-# Ordering. Groups run newest-first and that is where the recency lives. Within a
-# group the order is one of three, and `s` at the prompt cycles between them
-# without leaving the listing:
-#   --name     (-n)  alphabetical — the default; a bucket you scan for a name you
-#                    already have in mind
-#   --activity (-A)  busiest first — how many times the visit log recorded you
+# Ordering. Groups run newest-first. Within a group the order is one of three;
+# `s` at the prompt cycles them and `sr`/`sv`/`sn` jump straight to one, without
+# leaving the listing:
+#   --recency  (-t)  most recently opened first — the default, and what TODAY is
+#                    usually being read for: the last thing you were in is the
+#                    first line on the screen. (--time is the old spelling.)
+#   --visits   (-A)  busiest first — how many times the visit log recorded you
 #                    opening it inside that bucket's own day. The day you touched
 #                    forty repos becomes the four you actually worked in.
-#   --time     (-t)  newest first, the order the buckets are built in
-# LSRECENT_SORT=name|activity|time sets the default.
+#                    (--activity is the old spelling.)
+#   --name     (-n)  alphabetical — a bucket you scan for a name you already have
+#                    in mind
+# LSRECENT_SORT=recency|visits|name sets the default.
 #
 # Bulk touches. A repo's date is inferred from the filesystem when the visit log
 # has nothing newer, and one command run across every repo — a mass fetch, a
@@ -61,8 +64,14 @@
 #   n  or +   next page                 p  or -   previous page
 #   t         back to the top of this view
 #   a         everything in this view, unpaged
-#   s         cycle the order inside each group: name → activity → time
+#   s         cycle the order inside each group: recency → visits → name
+#   sr        sort by recency           sv  by visits        sn  by name
 #   ?         the same summary          enter, q, ctrl-d   stay put
+#
+# Every one of those keys prints in its own colour, distinct from the prose
+# describing it, wherever the tool offers it — the prompt line, the help, the
+# paging footer. A hint line is part key and part explanation, and the key is the
+# only part you are meant to type.
 #
 # The prompt needs the shell half of the pair to be current: shell-init exports
 # LSRECENT_SHELL with its version, and a listing that finds it missing or older
@@ -104,7 +113,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.11.0"
+VERSION="1.12.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -130,10 +139,26 @@ if [[ -t 1 ]]; then stdout_tty=1; else stdout_tty=0; fi
 # 256-colour orange where the terminal admits to having it, plain yellow — the
 # nearest an 8-colour palette gets — where it does not. COLORTERM is set by
 # essentially every graphical terminal; TERM covers the rest without a fork.
+#
+# Orange alone was not enough. Every hint line the tool prints is part key and
+# part prose — "s sort", "n for the next 20", "sr sort by recency" — and in one
+# colour the two halves fuse: the eye has to read the sentence to find the single
+# character it is being told to press. So the key gets its own ink (C_KEY) and
+# only the key does, which makes the whole help legible as a column of things to
+# type with explanations beside them rather than as a paragraph. C_NOW marks the
+# state a key would change and is the only green in the hint palette, so "which
+# order am I in" is answerable without reading; C_DIM is for separators and
+# punctuation, which are structure rather than information.
 if [[ "${TERM:-}" == *256color* || "${TERM:-}" == *direct* || -n "${COLORTERM:-}" ]]; then
-    C_HINT=$'\e[38;5;214m'
+    C_HINT=$'\e[38;5;214m'      # prose: what a key does, and every plain message
+    C_KEY=$'\e[1;38;5;51m'      # the characters you actually type
+    C_NOW=$'\e[1;38;5;120m'     # the current setting a key toggles
+    C_DIM=$'\e[38;5;244m'       # separators, brackets, arrows
 else
     C_HINT=$'\e[33m'
+    C_KEY=$'\e[1;36m'
+    C_NOW=$'\e[1;32m'
+    C_DIM=$'\e[90m'
 fi
 C_OFF=$'\e[0m'
 
@@ -797,7 +822,7 @@ stale_integration_notice() {
     else
         why="not loaded in this shell"
     fi
-    printf "${C_HINT}→ cd-by-number needs the shell integration reloaded (%s) — \`source ~/.bashrc\`, or open a new terminal${C_OFF}\n" \
+    printf "${C_DIM}→ ${C_HINT}cd-by-number needs the shell integration reloaded ${C_DIM}(${C_NOW}%s${C_DIM}) — ${C_KEY}source ~/.bashrc${C_HINT}, or open a new terminal${C_OFF}\n" \
         "$why"
 }
 
@@ -908,7 +933,7 @@ render_page() {
     local unlimited=${1:-}
     local total=${#view[@]}
     if (( total == 0 )); then
-        printf "${C_HINT}nothing matches \"%s\" — / on its own clears the search${C_OFF}\n" \
+        printf "${C_HINT}nothing matches ${C_NOW}\"%s\"${C_DIM} — ${C_KEY}/${C_HINT} on its own clears the search${C_OFF}\n" \
             "$view_filter" > /dev/tty
         return 0
     fi
@@ -929,29 +954,65 @@ render_page() {
     local first=$(( page_start + 1 )) last=$(( page_start + printed ))
     view_from=$last
     local scope='' nav
-    [[ -n "$view_filter" ]] && scope=" matching \"$view_filter\""
+    [[ -n "$view_filter" ]] && scope="${C_HINT} matching ${C_NOW}\"$view_filter\""
     if (( view_from < total )); then
-        printf -v nav ' · n for the next %d' \
+        printf -v nav "${C_DIM} · ${C_KEY}n${C_HINT} for the next %d" \
             "$(( total - view_from < printed ? total - view_from : printed ))"
     else
-        nav=' · end'
+        nav="${C_DIM} · ${C_HINT}end"
     fi
-    (( page_start > 0 )) && nav+=' · p for the page before'
-    printf "${C_HINT}… %d-%d of %d%s%s${C_OFF}\n" \
+    (( page_start > 0 )) && nav+="${C_DIM} · ${C_KEY}p${C_HINT} for the page before"
+    printf "${C_DIM}… ${C_NOW}%d-%d${C_HINT} of ${C_NOW}%d%s%s${C_OFF}\n" \
         "$first" "$last" "$total" "$scope" "$nav" > /dev/tty
 }
 
+# One line of help: what you type, then what it does. Two colours, never one —
+# the key is the only part of the line that is an instruction, and in a single
+# colour it disappears into the sentence explaining it.
+help_row() {
+    printf "  ${C_KEY}%-10s${C_HINT}%s${C_OFF}\n" "$1" "$2" > /dev/tty
+}
+
+# A sort row, with the one in force marked in C_NOW rather than described as
+# "(now: …)" somewhere else on the line. The marker is on the row it belongs to,
+# so the current order is found by looking rather than by reading.
+help_sort_row() {
+    local key=$1 mode=$2 now=''
+    [[ "$sort_mode" == "$mode" ]] && now="${C_NOW}  ← now${C_OFF}"
+    printf "  ${C_KEY}%-10s${C_HINT}sort by %s ${C_DIM}— %s${C_OFF}%s\n" \
+        "$key" "$(sort_label "$mode")" "$(sort_desc "$mode")" "$now" > /dev/tty
+}
+
 browse_help() {
-    cat > /dev/tty <<EOF
-${C_HINT}  23        cd into entry 23 — numbers are the ranking, not the page
-  text      search labels and paths for "text" (case-insensitive)
-  /         clear the search and go back to the full ranking
-  n  or +   next page              p  or -   previous page
-  t         back to the top of this view
-  a         everything in this view, unpaged
-  s         order inside each group: name → activity → time (now: $(sort_label))
-  ?         this          enter, q or ctrl-d    stay put${C_OFF}
-EOF
+    help_row '23'   'cd into entry 23 — numbers are the ranking, not the page'
+    help_row 'text' 'search labels and paths for "text" (case-insensitive)'
+    help_row '/'    'clear the search and go back to the full ranking'
+    help_row 'n  +' 'next page'
+    help_row 'p  -' 'previous page'
+    help_row 't'    'back to the top of this view'
+    help_row 'a'    'everything in this view, unpaged'
+    help_row 's'    "cycle the order: recency → visits → name"
+    help_sort_row 'sr' time
+    help_sort_row 'sv' activity
+    help_sort_row 'sn' name
+    help_row '?'    'this'
+    help_row 'enter q' 'stay put (ctrl-d too)'
+}
+
+# Re-print the listing in the current sort_mode. Re-print rather than re-order in
+# place: a listing's numbers are its own — 23 means the 23rd of *this* ranking —
+# so changing the order has to produce a new listing, above the prompt, the way
+# running the command again would. Cheap, too: the buckets are already built, so
+# nothing is stat'd or read a second time.
+resort() {
+    printf "${C_DIM}within each group: ${C_NOW}%s${C_DIM} — %s, renumbered${C_OFF}\n" \
+        "$(sort_label)" "$(sort_desc)" > /dev/tty
+    render_listing
+    build_view
+    # An unfiltered view continues below the screenful just printed, as it does on
+    # entry; a filtered one has its own first result and nothing above the prompt
+    # to continue from.
+    if [[ -n "$view_filter" ]]; then render_page; else view_from=$sel_shown; fi
 }
 
 browse() {
@@ -963,8 +1024,12 @@ browse() {
     view_from=$sel_shown
 
     while :; do
-        printf "${C_HINT}→ number, text to search, n/p pages, s sort, ? help, enter stays: ${C_OFF}" \
-            > /dev/tty
+        # Every key on this line is in C_KEY and nothing else is, so the line reads
+        # as a row of buttons with labels rather than as a sentence to be parsed.
+        # The order in force is named here too — it is the one piece of state the
+        # listing above cannot show, and it decides what the numbers mean.
+        printf "${C_DIM}→ ${C_HINT}number ${C_DIM}· ${C_HINT}text to search ${C_DIM}· ${C_KEY}n${C_DIM}/${C_KEY}p${C_HINT} pages ${C_DIM}· ${C_KEY}s${C_HINT} sort ${C_DIM}(${C_NOW}%s${C_DIM}) · ${C_KEY}?${C_HINT} help ${C_DIM}· ${C_KEY}enter${C_HINT} stays${C_DIM}: ${C_OFF}" \
+            "$(sort_label)" > /dev/tty
         # A bare `read` with no reply (EOF from ctrl-d) leaves the cursor mid-line.
         IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
 
@@ -975,7 +1040,7 @@ browse() {
                 browse_help; continue ;;
             '+'|n|N|next|more)
                 if (( view_from >= ${#view[@]} )); then
-                    printf "${C_HINT}that is the end of the list — p goes back${C_OFF}\n" > /dev/tty
+                    printf "${C_HINT}that is the end of the list ${C_DIM}— ${C_KEY}p${C_HINT} goes back${C_OFF}\n" > /dev/tty
                 else
                     render_page
                 fi
@@ -988,7 +1053,7 @@ browse() {
                 # never clears the screen — walking back down the list has to leave
                 # the same trail in the scrollback that walking up it did.
                 if (( page_start == 0 )); then
-                    printf "${C_HINT}that is the top — the first page is just above${C_OFF}\n" > /dev/tty
+                    printf "${C_HINT}that is the top ${C_DIM}— ${C_HINT}the first page is just above${C_OFF}\n" > /dev/tty
                 else
                     local back=$vp_page
                     (( back > 0 )) || back=$page_start
@@ -1002,25 +1067,26 @@ browse() {
             a|A|all)
                 view_from=0; render_page unlimited; continue ;;
             s|S|sort)
-                # Re-print rather than re-order in place. A listing's numbers are
-                # its own — 23 means the 23rd of *this* ranking — so changing the
-                # order has to produce a new listing, above the prompt, the way
-                # running the command again would. Cheap, too: the buckets are
-                # already built, so nothing is stat'd or read a second time.
+                # The cycle starts from the default and walks away from it, so one
+                # press of `s` is always "not recency" and the third press is home
+                # again.
                 case "$sort_mode" in
-                    name)     sort_mode=activity ;;
-                    activity) sort_mode=time ;;
-                    *)        sort_mode=name ;;
+                    time)     sort_mode=activity ;;
+                    activity) sort_mode=name ;;
+                    *)        sort_mode=time ;;
                 esac
-                printf "${C_HINT}within each group: %s — renumbered${C_OFF}\n" \
-                    "$(sort_label)"
-                render_listing
-                build_view
-                # An unfiltered view continues below the screenful just printed,
-                # as it does on entry; a filtered one has its own first result and
-                # nothing above the prompt to continue from.
-                if [[ -n "$view_filter" ]]; then render_page; else view_from=$sel_shown; fi
-                continue ;;
+                resort; continue ;;
+            # Direct selection as well as the cycle. Cycling is fine with three
+            # orders and one of them wanted; it is a guessing game when the one you
+            # want is two presses away and you have to read the screen between them
+            # to find out. `s` plus the order's initial goes straight there, and
+            # says nothing when you were already in it.
+            sr|SR|recency|recent)
+                sort_mode=time;     resort; continue ;;
+            sv|SV|sa|SA|visits|busiest)
+                sort_mode=activity; resort; continue ;;
+            sn|SN|alpha)
+                sort_mode=name;     resort; continue ;;
             /)
                 view_filter=''; build_view; render_page; continue ;;
         esac
@@ -1044,7 +1110,7 @@ browse() {
         fi
 
         if [[ -z ${sel_paths[10#$reply]:-} ]]; then
-            printf "${C_HINT}no entry %s — 1-%d, or text to search${C_OFF}\n" \
+            printf "${C_HINT}no entry ${C_NOW}%s${C_DIM} — ${C_HINT}1-${C_NOW}%d${C_HINT}, or text to search${C_OFF}\n" \
                 "$reply" "$sel_n" > /dev/tty
             continue
         fi
@@ -1086,7 +1152,8 @@ cmd_show() {
         case "$1" in
             # Only meaningful when this delegates to cmd_repos below; a directory
             # listed as its own children is laid out by `ls`, which has its own.
-            --all|-a|--time|-t|--name|-n|--activity|-A) passthru+=("$1") ;;
+            --all|-a|--time|--recency|-t|--name|-n|--activity|--visits|-A)
+                      passthru+=("$1") ;;
             -*)       die "unknown option: $1" ;;
             *)        target=$1 ;;
         esac
@@ -1187,8 +1254,17 @@ declare -a group_vars=(g_today g_yest g_d2 g_d3 g_d4 g_d5 g_d6 g_d7 \
 # log and rank by how often you go back to the thing at all.
 declare -a group_cutoff=()
 
-# Order within a bucket: name, activity or time.
-sort_mode=name
+# Order within a bucket: time, activity or name.
+#
+# `time` is the default, and was `name` until 1.12.0. The argument for name was
+# that the bucket already holds the recency, so within it the useful order is the
+# one you can scan for a name you already have in mind. That holds for the coarse
+# buckets — PAST MONTH is not a chronology anybody remembers — but not for TODAY,
+# which is the bucket the listing exists for and is read top-down: the last thing
+# you opened should be the first thing on the screen, because it is nearly always
+# the thing you meant to go back to. Alphabetical inside today's work puts it
+# wherever its initial falls.
+sort_mode=time
 
 lr_root=""
 lr_cols=80
@@ -1331,11 +1407,23 @@ order_listing() {
     return 0
 }
 
+# Two names per order, and both are needed. The short one is a word the prompt
+# can carry on every line without crowding it — it answers "which order am I in"
+# — and the long one is the sentence the help gives once, next to the key that
+# selects it.
 sort_label() {
-    case "$sort_mode" in
-        time)     echo "most recent first" ;;
-        activity) echo "most visits first" ;;
+    case "${1:-$sort_mode}" in
+        time)     echo "recency" ;;
+        activity) echo "visits" ;;
         *)        echo "name" ;;
+    esac
+}
+
+sort_desc() {
+    case "${1:-$sort_mode}" in
+        time)     echo "most recently opened first" ;;
+        activity) echo "busiest first, inside the bucket's own day" ;;
+        *)        echo "alphabetical" ;;
     esac
 }
 
@@ -1418,7 +1506,7 @@ render_listing() {
         esac
         # The elided repos are still numbered, so the footer names the range
         # rather than only offering --all: typing 23 works from here.
-        printf "${C_HINT}… %d more, numbered %d-%d · n pages to them, %s --all prints them${C_OFF}\n" \
+        printf "${C_DIM}… ${C_NOW}%d${C_HINT} more, numbered ${C_NOW}%d-%d${C_DIM} · ${C_KEY}n${C_HINT} pages to them, ${C_KEY}%s --all${C_HINT} prints them${C_OFF}\n" \
             "$hidden" "$(( sel_shown + 1 ))" "$sel_n" "$hint"
     fi
     noise_footer
@@ -1441,10 +1529,10 @@ noise_footer() {
         worst=$day; worst_n=${noise_suppressed[$day]}
     done
     if (( ${#noise_suppressed[@]} > 1 )); then
-        printf "${C_HINT}↯ %d repos dated only by bulk touches on %d days — UNDATED, not recent work · \`lsrecent noise\` lists them${C_OFF}\n" \
+        printf "${C_DIM}↯ ${C_NOW}%d${C_HINT} repos dated only by bulk touches on ${C_NOW}%d${C_HINT} days — UNDATED, not recent work ${C_DIM}· ${C_KEY}lsrecent noise${C_HINT} lists them${C_OFF}\n" \
             "$noise_total" "${#noise_suppressed[@]}"
     else
-        printf "${C_HINT}↯ %d repos dated only by a bulk touch on %s — UNDATED, not recent work · \`lsrecent noise remove %s\` trusts that day again${C_OFF}\n" \
+        printf "${C_DIM}↯ ${C_NOW}%d${C_HINT} repos dated only by a bulk touch on ${C_NOW}%s${C_HINT} — UNDATED, not recent work ${C_DIM}· ${C_KEY}lsrecent noise remove %s${C_HINT} trusts that day again${C_OFF}\n" \
             "$noise_total" "$worst" "$worst"
     fi
 }
@@ -1453,9 +1541,11 @@ cmd_repos() {
     local want_window="" full=0 root=""
     # Set before the loop, so an explicit flag on the command line still wins.
     case "${LSRECENT_SORT:-}" in
-        time|activity|name) sort_mode=${LSRECENT_SORT} ;;
-        '')                 sort_mode=name ;;
-        *)                  die "LSRECENT_SORT must be name, activity or time: $LSRECENT_SORT" ;;
+        time|recency|recent) sort_mode=time ;;
+        activity|visits)     sort_mode=activity ;;
+        name)                sort_mode=name ;;
+        '')                  sort_mode=time ;;
+        *)                   die "LSRECENT_SORT must be recency, visits or name: $LSRECENT_SORT" ;;
     esac
     lr_no_limit=0
     while (( $# )); do
@@ -1464,9 +1554,9 @@ cmd_repos() {
             --yesterday)   want_window=yesterday ;;
             --full)        full=1 ;;
             --all|-a)      lr_no_limit=1 ;;
-            --time|-t)     sort_mode=time ;;
-            --name|-n)     sort_mode=name ;;
-            --activity|-A) sort_mode=activity ;;
+            --time|--recency|-t)     sort_mode=time ;;
+            --name|-n)               sort_mode=name ;;
+            --activity|--visits|-A)  sort_mode=activity ;;
             -*)            die "unknown option: $1" ;;
             *)             root=$1 ;;
         esac
