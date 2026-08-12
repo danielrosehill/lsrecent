@@ -241,8 +241,15 @@ and still work, as do `LSRECENT_SORT=time` and `=activity`.
 ```bash
 lsrepos -A            # the busiest repo of each day at the top of its bucket
 lstoday -n            # today's work, alphabetical
-export LSRECENT_SORT=name    # ... or make that the default
 ```
+
+**`ss` keeps the order you are looking at.** Which order you want is not a
+question you answer in the abstract — you answer it by pressing `s` until the
+screen looks right, and at that moment the answer is on the screen and one
+keystroke from being lost. `ss` writes it to the [settings
+file](#settings-that-outlive-the-shell), so every listing from then on starts in
+it. `lsrecent config set sort visits` is the same thing said outright, and
+`export LSRECENT_SORT=name` still overrides both for one shell.
 
 **Activity is visits, counted inside the bucket's own day.** A day bucket ranks by
 how many times the [visit log](#opened-today-and-the-visit-log) recorded you
@@ -311,6 +318,7 @@ what it had just numbered. It accepts more than a number:
 | `a` | everything in the current view, unpaged |
 | `s` | cycle the order inside each group: recency → frecency → visits → name |
 | `sr` / `sf` / `sv` / `sn` | go straight to that order — recency, frecency, visits, name |
+| `ss` | **keep** the order in force — every listing starts in it from now on |
 | `?` | the same summary |
 | enter, `q`, ctrl-d | stay put — except that enter takes the **only match** of a search |
 
@@ -650,6 +658,70 @@ if you touch `snap_midnight` or `day_midnights`. Zones that transition *at*
 midnight, such as America/Santiago, land within the hour twice a year; nothing
 here cares.
 
+## Settings that outlive the shell
+
+Every tunable already existed as an `LSRECENT_*` environment variable, and a
+variable is the right shape for *this shell, this listing*. It is the wrong shape
+for *this is how I like it*: four exports in `~/.bashrc` are a preference recorded
+in a file about shells, invisible to the tool that obeys it and unwritable by it —
+so `s` at the prompt could find the order you wanted and then had nowhere to put
+it. Since 1.14.0 there is a file, holding the same settings under shorter names.
+
+```bash
+lsrecent config                      # every setting, its value, and where that value came from
+lsrecent config set sort visits      # ... or press ss at the prompt
+lsrecent config unset sort
+lsrecent config get repo_root
+lsrecent config edit                 # the file in $EDITOR
+lsrecent config path
+```
+
+| Setting | Variable | Accepts | Default |
+| --- | --- | --- | --- |
+| `sort` | `LSRECENT_SORT` | `recency`, `frecency`, `visits`, `name` | `recency` |
+| `prompt` | `LSRECENT_PROMPT` | `0`, `1` | `1` |
+| `max_rows` | `LSRECENT_MAX_ROWS` | a number, `0` for unlimited | as many as the screen has |
+| `noise_pct` | `LSRECENT_NOISE_PCT` | 0–100 | `50` |
+| `repo_root` | `LSRECENT_REPO_ROOT` | a path | `~/repos/github`, else `~/repos` |
+| `repo_depth` | `LSRECENT_REPO_DEPTH` | a number | `4` |
+
+**A flag beats the environment, the environment beats the file, the file beats the
+default.** So an export is still how you say "just this shell" and the file is how
+you say "always", and neither had to be taught about the other: the loader fills
+in the `LSRECENT_*` variables that are *not already set*, and every
+`${LSRECENT_X:-default}` in the rest of the script goes on reading what it always
+read.
+
+That ordering has one failure mode worth designing against — writing a preference
+that is silently outranked by an export you made months ago and forgot. So
+`config set`, `config unset` and `ss` all say so when the variable is set in the
+current shell, rather than reporting a success that will not be visible.
+
+The file is `${XDG_CONFIG_HOME:-~/.config}/lsrecent/config`, `key = value`, one
+per line. A `#` starts a comment when it opens the line or follows a space, so a
+path may contain one. It is meant to be edited by hand as much as by `config
+set`, which is why `config set` rewrites it line by line and leaves your comments
+and ordering alone.
+
+```
+# my own note
+sort = visits
+repo_depth = 3   # inline comments work
+```
+
+A line the file gets wrong — an unknown setting, a value out of range, something
+that is not `key = value` at all — is **ignored and reported on every run** until
+it is fixed. Not fatal, because the file is read by every bare `ls` in an override
+directory and one stale typo should not take your shell prompt with it; not
+silent, because falling back to the default without saying so is the failure that
+looks like success. The two commands that must never print — `check`, which the
+`ls` wrapper runs on every prompt, and `visit`, which runs on every directory
+change — stay quiet, and neither reads a setting anyway.
+
+It is parsed in-process rather than `source`d. Sourcing would have been three
+lines shorter and would have made the config file a shell script, in which a typo
+is an arbitrary command and `repo_root = $(rm -rf ~)` is a valid setting.
+
 ## The picker
 
 `lsrp` lists every repo newest-first in `fzf` and `cd`s into what you choose;
@@ -733,6 +805,8 @@ rules out aliases.
 ```
 
 `${XDG_CONFIG_HOME:-~/.config}/lsrecent/noisy-days` — created on first `noise add` or `noise remove`. Same shape, one `YYYY-MM-DD` per line, `!YYYY-MM-DD` for a day that must never be auto-suppressed. See [When something touches everything at once](#when-something-touches-everything-at-once).
+
+`${XDG_CONFIG_HOME:-~/.config}/lsrecent/config` — created on first `config set` or `ss`. `key = value`, one per line. See [Settings that outlive the shell](#settings-that-outlive-the-shell).
 
 Plain text rather than JSON because a pure-bash tool shouldn't need `jq` or Python to read its own state, and the file stays trivially hand-editable, greppable, and dotfile-manager-friendly. The CLI is the intended interface; manual edits are equally valid.
 

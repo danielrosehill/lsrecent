@@ -47,7 +47,11 @@
 #                    stays in recency order rather than collapsing to the alphabet.
 #   --name     (-n)  alphabetical — a bucket you scan for a name you already have
 #                    in mind
-# LSRECENT_SORT=recency|frecency|visits|name sets the default.
+# The default is whichever `sort` the settings file names, or recency. `ss` at the
+# prompt writes the order you are looking at there, so the order is chosen by
+# pressing `s` until the screen is right and then keeping it; `lsrecent config set
+# sort visits` is the same thing said outright. LSRECENT_SORT still overrides both
+# for one shell.
 #
 # Bulk touches. A repo's date is inferred from the filesystem when the visit log
 # has nothing newer, and one command run across every repo — a mass fetch, a
@@ -85,6 +89,7 @@
 #   a         everything in this view, unpaged
 #   s         cycle the order inside each group: recency → frecency → visits → name
 #   sr  recency    sf  frecency    sv  visits    sn  name
+#   ss        keep that order — every listing starts in it from now on
 #   ?         the same summary          enter, q, ctrl-d   stay put
 #
 # Every one of those keys prints in its own colour, distinct from the prose
@@ -114,6 +119,27 @@
 #   lsrecent gui             Same list in a window (needs the lsrecent-gui
 #                            companion; also in the app launcher)
 #
+# Settings (preferences that outlive the shell):
+#   lsrecent config          Every setting, its value, and where that value is
+#                            coming from — the file, an LSRECENT_* variable in
+#                            this shell, or the built-in default
+#   lsrecent config set <setting> <value>
+#   lsrecent config unset <setting>
+#   lsrecent config get <setting>
+#   lsrecent config edit     The file in $EDITOR
+#   lsrecent config path     Where the file is
+# The settings, all of which already existed as LSRECENT_* variables:
+#   sort        recency, frecency, visits or name
+#   prompt      1 to end a listing with the browser prompt, 0 for listing only
+#   max_rows    rows one listing may occupy, 0 for unlimited
+#   noise_pct   share of repos on one inferred day that makes it a bulk touch
+#   repo_root   where the repositories are
+#   repo_depth  how deep under the root to look for them
+# A flag beats the environment, the environment beats the file, and the file beats
+# the default — so an export is still how you say "just this shell", and the file
+# is how you say "always". A setting written while the matching variable is
+# exported says so rather than appearing to have taken effect.
+#
 # Visit log (what "opened" means):
 #   lsrecent visit [dir]     Record a visit to dir (the shell hook does this
 #                            inline; this is the fallback for other shells)
@@ -124,19 +150,25 @@
 #                                eval "$(lsrecent shell-init)"
 #
 # Config lives in ${XDG_CONFIG_HOME:-~/.config}/lsrecent/dirs — one absolute
-# path per line, and .../lsrecent/noisy-days — one YYYY-MM-DD per line, `!` in
-# front of a day meaning "never suppress this one". The visit log lives in
+# path per line, .../lsrecent/noisy-days — one YYYY-MM-DD per line, `!` in
+# front of a day meaning "never suppress this one", and .../lsrecent/config —
+# `key = value`, one per line, `#` comments. All three are meant to be edited by
+# hand as much as by the commands that write them. A line the settings file gets
+# wrong is ignored and reported on every run rather than taken as read: falling
+# back to the default in silence is the failure that looks like success. The
+# visit log lives in
 # ${XDG_DATA_HOME:-~/.local/share}/lsrecent/opened.log — "<epoch>\t<path>", and
 # the last listing's numbering in .../lsrecent/last-list — "<n>\t<path>".
 #
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.13.0"
+VERSION="1.14.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
 noise_file="$config_dir/noisy-days"
+settings_file="$config_dir/config"
 state_dir="${XDG_DATA_HOME:-$HOME/.local/share}/lsrecent"
 visit_log="$state_dir/opened.log"
 sel_map="$state_dir/last-list"
@@ -366,6 +398,314 @@ cmd_check() {
 cmd_edit() {
     ensure_config
     "${EDITOR:-nano}" "$config"
+}
+
+# ---------------------------------------------------------------------------
+# Settings
+#
+# Every tunable already existed as an LSRECENT_* environment variable, and a
+# variable is the right shape for "this shell, this listing". It is the wrong
+# shape for "this is how I like it": four exports in ~/.bashrc are a preference
+# recorded in a file about shells, invisible to the tool that obeys it and
+# unwritable by it — so `s` at the prompt could find the order you wanted and
+# then had nowhere to put it. Hence a file, holding the same settings under
+# shorter names.
+#
+# Precedence is flag, then environment, then file, then built-in default, and it
+# falls out of *how* the file is loaded rather than being enforced anywhere:
+# load_settings fills in the LSRECENT_* variables that are not already set, and
+# every `${LSRECENT_X:-default}` in the rest of the script goes on reading what
+# it always read. A variable already in the environment is left exactly as found,
+# so an export still wins; flags are parsed afterwards, so a flag wins over both.
+#
+# The file is read on every run, including the bare `ls` in an override
+# directory, so it is parsed in-process — no fork, and no `source`, which would
+# make a config file a shell script and a typo in it an arbitrary command.
+# ---------------------------------------------------------------------------
+
+# What the file and `lsrecent config` call a setting, against what the script
+# reads. Adding a tunable means adding it here and to the three little tables
+# below; nothing else in the script has to know the file exists.
+declare -A settings_var=(
+    [sort]=LSRECENT_SORT
+    [prompt]=LSRECENT_PROMPT
+    [max_rows]=LSRECENT_MAX_ROWS
+    [noise_pct]=LSRECENT_NOISE_PCT
+    [repo_root]=LSRECENT_REPO_ROOT
+    [repo_depth]=LSRECENT_REPO_DEPTH
+)
+# Printed in this order. Bash hands back the keys of an associative array in its
+# own hash order, which is neither the order they were written in nor stable
+# between values, and a settings listing that reshuffles itself is unreadable.
+settings_keys=( sort prompt max_rows noise_pct repo_root repo_depth )
+
+setting_desc() {
+    case $1 in
+        sort)       echo "order inside each group" ;;
+        prompt)     echo "end a listing with the browser prompt" ;;
+        max_rows)   echo "rows one listing may occupy" ;;
+        noise_pct)  echo "share of repos on one inferred day that makes it a bulk touch" ;;
+        repo_root)  echo "where the repositories are" ;;
+        repo_depth) echo "how deep under the root to look for them" ;;
+    esac
+}
+
+# What a setting will accept, phrased to be readable at the end of "sort must
+# be …". Used by the error, by the generated file's comments and by `config`
+# itself, so the three cannot drift apart.
+setting_values() {
+    case $1 in
+        sort)       echo "recency, frecency, visits or name" ;;
+        prompt)     echo "0 or 1" ;;
+        max_rows)   echo "a number, 0 for unlimited" ;;
+        noise_pct)  echo "a number from 0 to 100" ;;
+        repo_root)  echo "a path" ;;
+        repo_depth) echo "a number" ;;
+    esac
+}
+
+# What the setting is when nobody has said otherwise. Shown rather than assumed:
+# "default" next to a blank is a listing that makes you go and read the source to
+# find out what it defaults to.
+setting_default() {
+    case $1 in
+        sort)       echo "recency" ;;
+        prompt)     echo "1" ;;
+        max_rows)   echo "as many as the screen has" ;;
+        noise_pct)  echo "50" ;;
+        repo_root)  default_root ;;
+        repo_depth) echo "4" ;;
+    esac
+}
+
+setting_check() {
+    local key=$1 val=$2
+    case $key in
+        sort)
+            # The old spellings are accepted here as they are in LSRECENT_SORT —
+            # a value that works in the environment must work in the file, or the
+            # file is a second dialect of the same setting.
+            case "$val" in
+                recency|recent|time|frecency|visits|activity|name) ;;
+                *) return 1 ;;
+            esac ;;
+        prompt)     [[ "$val" == 0 || "$val" == 1 ]] || return 1 ;;
+        max_rows|repo_depth) [[ "$val" =~ ^[0-9]+$ ]] || return 1 ;;
+        noise_pct)  [[ "$val" =~ ^[0-9]+$ ]] && (( 10#$val <= 100 )) || return 1 ;;
+        repo_root)  [[ -n "$val" ]] || return 1 ;;
+    esac
+    return 0
+}
+
+# Which settings this run is taking from the file, and everything the file got
+# wrong. Collected rather than printed as they are met: the parse runs before the
+# command is known, and `check` — the hot path the ls wrapper calls on every
+# prompt — has no business printing anything at all.
+declare -A settings_from=()
+settings_bad=()
+
+load_settings() {
+    [[ -f "$settings_file" ]] || return 0
+    local line key val var
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # A whole-line comment, or blank. An inline comment has to be introduced
+        # by whitespace, so a `#` inside a path is part of the path: values here
+        # are mostly paths, and a directory may legally contain one.
+        [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+        line=${line%%[[:space:]]#*}
+        if [[ "$line" != *=* ]]; then
+            settings_bad+=( "not \`key = value\`: $line" )
+            continue
+        fi
+        key=${line%%=*}; val=${line#*=}
+        key=${key#"${key%%[![:space:]]*}"}; key=${key%"${key##*[![:space:]]}"}
+        val=${val#"${val%%[![:space:]]*}"}; val=${val%"${val##*[![:space:]]}"}
+
+        var=${settings_var[$key]:-}
+        if [[ -z "$var" ]]; then
+            settings_bad+=( "unknown setting: $key" )
+            continue
+        fi
+        # A bad value in the file is refused rather than passed through to the
+        # place that uses it. The environment can afford to die on one — you
+        # typed it a second ago — but the file was written weeks back and is read
+        # by every bare `ls`, so one stale typo would take the shell prompt with
+        # it. It is ignored *and* complained about on every run until fixed;
+        # silently falling back to the default is the failure that looks like
+        # success.
+        if ! setting_check "$key" "$val"; then
+            settings_bad+=( "$key must be $(setting_values "$key"): $val" )
+            continue
+        fi
+
+        # Only where the environment has not already spoken. `+set` rather than
+        # `-n`, so that exporting an empty value is still a decision.
+        [[ -n "${!var+set}" ]] && continue
+        [[ "$key" == repo_root ]] && val=${val/#\~/$HOME}
+        printf -v "$var" '%s' "$val"
+        settings_from[$key]=1
+    done < "$settings_file"
+    return 0
+}
+
+settings_complain() {
+    local msg
+    for msg in "${settings_bad[@]}"; do
+        printf 'lsrecent: %s: %s\n' "$settings_file" "$msg" >&2
+    done
+}
+
+ensure_settings() {
+    mkdir -p "$config_dir"
+    [[ -f "$settings_file" ]] && return 0
+    local k
+    {
+        echo "# lsrecent settings: \`key = value\`, one per line. A \`#\` starts a comment"
+        echo "# when it opens the line or follows a space, so a path may contain one."
+        echo "#"
+        echo "# Written by \`lsrecent config set|unset\`, which preserves hand edits and"
+        echo "# comments. The matching LSRECENT_* environment variable wins over anything"
+        echo "# here, and a flag on the command line wins over both."
+        echo "#"
+        for k in "${settings_keys[@]}"; do
+            printf '#   %-11s %s — %s\n' "$k" "$(setting_desc "$k")" "$(setting_values "$k")"
+        done
+    } > "$settings_file"
+    return 0
+}
+
+# Rewrite the file with $1 set to $2, or removed when $2 is omitted. Line by line
+# rather than regenerated from the table: the file is meant to be edited by hand
+# as much as by this, and a rewrite that discarded the comments and ordering
+# somebody put there would make `config set` the thing you stop using.
+write_setting() {
+    local key=$1 seen=0 line k
+    ensure_settings
+    local tmp; tmp=$(mktemp "${settings_file}.XXXXXX") || die "cannot write $settings_file"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        k=''
+        if [[ ! "$line" =~ ^[[:space:]]*# && "$line" == *=* ]]; then
+            k=${line%%=*}
+            k=${k#"${k%%[![:space:]]*}"}; k=${k%"${k##*[![:space:]]}"}
+        fi
+        if [[ "$k" == "$key" ]]; then
+            # The first line for a key is the one rewritten and any later one is
+            # dropped, so that setting a value cannot leave the file saying two
+            # different things. First rather than last because that is the one
+            # load_settings takes: it fills a variable that is not already set,
+            # so the first line to mention a key is the one that fills it and
+            # every later line finds the work done.
+            (( seen )) && continue
+            seen=1
+            (( $# >= 2 )) && printf '%s = %s\n' "$key" "$2"
+            continue
+        fi
+        printf '%s\n' "$line"
+    done < "$settings_file" > "$tmp"
+    (( seen )) || (( $# < 2 )) || printf '%s = %s\n' "$key" "$2" >> "$tmp"
+    mv -f "$tmp" "$settings_file"
+}
+
+# The one thing a settings file can do that a variable cannot is be wrong in
+# silence — written, believed, and overridden by an export nobody remembers
+# making. So every path that writes one says so when it has just been outranked.
+#
+# Prints on stdout and leaves the redirection to the caller, which is the whole
+# of why it takes no destination argument. Passing one and redirecting with
+# `> "$out"` looks equivalent and is not: `> /dev/stderr` is an open with
+# O_TRUNC, so when stderr is a regular file — a script logging a run, which is
+# exactly when nobody is watching — the note lands at offset 0 and eats whatever
+# had already been written there. `>&2` at the call site duplicates the existing
+# descriptor and appends, and the browser's `> /dev/tty` is unaffected either way.
+warn_env_wins() {
+    local key=$1 var=${settings_var[$1]}
+    [[ -n "${!var+set}" && -z "${settings_from[$key]:-}" ]] || return 0
+    printf "${C_HINT}note: ${C_NOW}\$%s${C_HINT} is set in this shell (${C_NOW}%s${C_HINT}) and wins over the file until it is unset${C_OFF}\n" \
+        "$var" "${!var}"
+}
+
+# Where each setting's value is actually coming from on this run, which is the
+# question a settings listing is being read to answer. "sort = visits" in the
+# file while $LSRECENT_SORT says otherwise is the one state worth printing, and
+# it is invisible unless the origin is printed beside the value.
+setting_origin() {
+    local key=$1 var=${settings_var[$1]}
+    if [[ -n "${settings_from[$key]:-}" ]]; then echo "config"
+    elif [[ -n "${!var+set}" ]];         then echo "\$$var"
+    else                                      echo "default"
+    fi
+}
+
+settings_show() {
+    local k var val origin
+    printf "${C_DIM}%s${C_OFF}\n\n" "$settings_file"
+    for k in "${settings_keys[@]}"; do
+        var=${settings_var[$k]}
+        origin=$(setting_origin "$k")
+        if [[ "$origin" == default ]]; then
+            val=$(setting_default "$k")
+        else
+            val=${!var}
+        fi
+        # One space after the value even when it has overrun its column: a long
+        # default like "as many as the screen has" would otherwise be printed
+        # welded to the word saying where it came from.
+        printf "  ${C_KEY}%-11s${C_NOW}%-26s ${C_DIM}%s${C_OFF}\n" "$k" "$val" "$origin"
+        printf "  ${C_DIM}%-11s${C_HINT}%s ${C_DIM}— %s${C_OFF}\n" \
+            '' "$(setting_desc "$k")" "$(setting_values "$k")"
+    done
+    # No settings_complain here: dispatch has already printed the file's bad
+    # lines, above this listing, before it knew which command was running.
+    printf "\n${C_DIM}→ ${C_KEY}lsrecent config set ${C_DIM}<${C_HINT}setting${C_DIM}> <${C_HINT}value${C_DIM}> · ${C_KEY}unset ${C_DIM}<${C_HINT}setting${C_DIM}> · ${C_KEY}edit${C_OFF}\n"
+    return 0
+}
+
+# Built by hand rather than with `IFS=', '` and `${settings_keys[*]}`, which
+# looks like it joins on both characters and joins on the comma only.
+settings_key_list() {
+    local out='' k
+    for k in "${settings_keys[@]}"; do out+="${out:+, }$k"; done
+    echo "$out"
+}
+
+cmd_config() {
+    local action=${1:-show} key=${2:-}
+    case "$action" in
+        show|list|"")
+            settings_show ;;
+        get)
+            [[ -n "$key" ]] || die "which setting? ($(settings_key_list))"
+            local var=${settings_var[$key]:-}
+            [[ -n "$var" ]] || die "unknown setting: $key ($(settings_key_list))"
+            if [[ "$(setting_origin "$key")" == default ]]; then
+                setting_default "$key"
+            else
+                printf '%s\n' "${!var}"
+            fi ;;
+        set)
+            [[ -n "$key" ]] || die "which setting? ($(settings_key_list))"
+            [[ -n "${settings_var[$key]:-}" ]] || die "unknown setting: $key ($(settings_key_list))"
+            (( $# >= 3 )) || die "no value — \`lsrecent config set $key <$(setting_values "$key")>\`"
+            # Checked here as well as at load, because this is the copy of the
+            # check that runs while you are still looking at what you typed.
+            setting_check "$key" "$3" || die "$key must be $(setting_values "$key"): $3"
+            write_setting "$key" "$3"
+            printf "lsrecent: %s = %s\n" "$key" "$3"
+            warn_env_wins "$key" >&2 ;;
+        unset|remove|rm)
+            [[ -n "$key" ]] || die "which setting? ($(settings_key_list))"
+            [[ -n "${settings_var[$key]:-}" ]] || die "unknown setting: $key ($(settings_key_list))"
+            write_setting "$key"
+            printf "lsrecent: %s is back to its default (%s)\n" "$key" "$(setting_default "$key")"
+            warn_env_wins "$key" >&2 ;;
+        edit)
+            ensure_settings
+            "${EDITOR:-nano}" "$settings_file" ;;
+        path)
+            printf '%s\n' "$settings_file" ;;
+        *)
+            die "unknown config command: $action (show, get, set, unset, edit, path)" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -1093,8 +1433,23 @@ browse_help() {
     help_sort_row 'sf' frecency
     help_sort_row 'sv' activity
     help_sort_row 'sn' name
+    help_row 'ss'   'keep the order in force — every listing starts in it from now on'
     help_row '?'    'this'
     help_row 'enter q' 'stay put (ctrl-d too)'
+}
+
+# Keep the order in force, for every listing from now on. This is the place the
+# question gets answered: you find out which order you actually want by pressing
+# `s` until the screen looks right, and being told at that moment to quit and run
+# a second command from memory is how a preference stays unset for a year. The
+# label the prompt has been showing all along is also a legal value of the
+# setting, so what is written is literally what the screen says.
+save_sort() {
+    local label; label=$(sort_label)
+    write_setting sort "$label"
+    printf "${C_HINT}kept: every listing now starts in ${C_NOW}%s${C_HINT} order ${C_DIM}· %s${C_OFF}\n" \
+        "$label" "$settings_file" > /dev/tty
+    warn_env_wins sort > /dev/tty
 }
 
 # Re-print the listing in the current sort_mode. Re-print rather than re-order in
@@ -1103,7 +1458,7 @@ browse_help() {
 # running the command again would. Cheap, too: the buckets are already built, so
 # nothing is stat'd or read a second time.
 resort() {
-    printf "${C_DIM}within each group: ${C_NOW}%s${C_DIM} — %s, renumbered${C_OFF}\n" \
+    printf "${C_DIM}within each group: ${C_NOW}%s${C_DIM} — %s, renumbered ${C_DIM}· ${C_KEY}ss${C_HINT} keeps it${C_OFF}\n" \
         "$(sort_label)" "$(sort_desc)" > /dev/tty
     render_listing
     build_view
@@ -1198,6 +1553,8 @@ browse() {
                 sort_mode=frecency; resort; continue ;;
             sn|SN|alpha)
                 sort_mode=name;     resort; continue ;;
+            ss|SS|save|keep)
+                save_sort; continue ;;
             /)
                 view_filter=''; build_view; render_page; continue ;;
         esac
@@ -1986,12 +2343,26 @@ EOF
 # Dispatch
 # ---------------------------------------------------------------------------
 
+# Before anything reads an LSRECENT_* variable, and before the command is known,
+# because `ls` in an override directory arrives here with no command at all.
+load_settings
+# A broken line in the file is said out loud on every run until it is fixed —
+# except on the two paths that must stay silent. `check` is called by the ls
+# wrapper on every prompt in every shell, and `visit` on every directory change:
+# a warning there would not be a warning, it would be the shell being unusable.
+# Both ignore settings entirely, so there is nothing lost by staying quiet.
+case "${1:-}" in
+    check|visit) ;;
+    *)           settings_complain ;;
+esac
+
 case "${1:-}" in
     add)         cmd_add "${2:-}" ;;
     remove|rm)   cmd_remove "${2:-}" ;;
     list)        cmd_list ;;
     check)       cmd_check "${2:-}" ;;
     edit)        cmd_edit ;;
+    config)      shift; cmd_config "$@" ;;
     visit)       cmd_visit "${2:-}" ;;
     prune)       load_visits; cmd_prune ;;
     noise)       shift; cmd_noise "$@" ;;

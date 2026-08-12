@@ -1,3 +1,32 @@
+lsrecent (1.14.0) unstable; urgency=low
+
+  * A settings file, ${XDG_CONFIG_HOME:-~/.config}/lsrecent/config, holding the
+    six tunables that until now existed only as LSRECENT_* variables: sort,
+    prompt, max_rows, noise_pct, repo_root, repo_depth. `key = value`, one per
+    line, `#` comments, and meant to be hand-edited as much as written to.
+  * `ss` at the prompt keeps the order in force. Which order you want is a
+    question you answer by pressing `s` until the screen looks right, and being
+    told at that moment to quit and run a second command from memory is how a
+    preference stays unset for a year.
+  * `lsrecent config` reports every setting, its value, and whether that value is
+    coming from the file, from a variable in this shell, or from the built-in
+    default. `config set|unset|get|edit|path` for the rest.
+  * A flag beats the environment, the environment beats the file, the file beats
+    the default — which falls out of the loader filling in only the LSRECENT_*
+    variables that are not already set, rather than being enforced anywhere. A
+    setting written while the matching variable is exported says so, instead of
+    reporting a success that will not be visible.
+  * A line the settings file gets wrong is ignored and reported on every run
+    rather than taken as read: the file is parsed by every bare `ls` in an
+    override directory, so one stale typo must not take the shell prompt with it,
+    and falling back to the default in silence is the failure that looks like
+    success. `check` and `visit` stay quiet — they run on every prompt and every
+    directory change, and read no settings.
+  * Parsed in-process rather than sourced. Sourcing would have made the config
+    file a shell script, in which a typo is an arbitrary command.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Thu, 13 Aug 2026 01:05:00 +0300
+
 lsrecent (1.13.0) unstable; urgency=low
 
   * A positional argument that is not written like a path is now a search rather
