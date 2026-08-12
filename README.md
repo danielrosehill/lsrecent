@@ -86,6 +86,10 @@ lsrepos --all         # the whole listing, past one screenful (-a works too)
 lsrepos -A            # busiest-first within each bucket
 lsrepos -n            # alphabetical within each bucket, not most-recent-first
 
+lsrepos wms           # only the repos matching "wms", still grouped by recency
+lsr wms               # the same, by the shortest route
+lstoday claude        # today's work, narrowed
+
 lsrecent noise        # what a tree-wide sweep is being stopped from dating
 
 lsrp                  # fzf picker over every repo, then cd into it
@@ -101,6 +105,43 @@ interactively, because only a function running in your shell can `cd` it. Each
 wraps the corresponding subcommand of the binary — `lsrecent`, `lsrecent repos`,
 `lsrecent today`, `lsrecent yesterday`, `lsrecent pick` — which are what to call
 from scripts: they list, and print, but never prompt.
+
+### Searching from the command line
+
+A positional argument written **like a path** — it has a slash in it, or it is `.`
+or `..` — is the root to list. **Anything else is a search** over repository names
+and paths:
+
+```bash
+lsrepos wms           # every repo matching "wms", grouped by recency as usual
+lsr wms               # `lsr` is the alias for `lsrecent`, so this works too
+lstoday claude
+lsr ./wms             # ...and this still means the directory
+```
+
+The set is reduced **before** bucketing, so what prints is an ordinary grouped
+listing that happens to contain only matches — numbered from 1, under the same
+headers, answered by the same prompt, with the matched characters highlighted.
+Filtering at the prompt instead would mean numbering 315 repositories in order to
+show four of them.
+
+**A search matching exactly one repository does not ask.** It prints the match and
+cds there:
+
+```
+$ lsr noisy
+━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1 noisycity-api-blueprint
+→ the only match · /home/you/repos/github/smart-home/noisycity-api-blueprint
+$ pwd
+/home/you/repos/github/smart-home/noisycity-api-blueprint
+```
+
+Deciding by "is it a directory?" instead of by "is it written like a path?" was
+the obvious rule and the wrong one: it would make `lsrepos smart-home` mean
+different things depending on which directory you were standing in, and would read
+a bare repository name as a root the moment one happened to exist beside you. At a
+tool whose job is jumping to repositories by name, a name means the name.
 
 ## Repository level
 
@@ -177,14 +218,22 @@ thing you were in is nearly always the thing you are going back to, and it shoul
 be line 1 rather than wherever its initial falls. `sn` at the prompt is one
 keystroke away when you want the alphabet back.
 
-There are three orders. `s` at the prompt cycles them, and `sr` / `sv` / `sn` jump
-straight to one, without leaving the listing:
+There are four orders. `s` at the prompt cycles them, and `sr` / `sf` / `sv` /
+`sn` jump straight to one, without leaving the listing:
 
 | Flag | Prompt key | Order inside a bucket |
 | --- | --- | --- |
 | `--recency` (`-t`) | `sr` | most recently opened first — **the default** |
+| `--frecency` (`-f`) | `sf` | visits first, most recent breaking the ties |
 | `--visits` (`-A`) | `sv` | busiest first: how many times you opened it *that day* |
 | `--name` (`-n`) | `sn` | alphabetical, case-insensitive |
+
+**Frecency is the two signals together**, because neither alone is the question
+you are asking. The repo you opened nine times today beats the one you opened
+once at lunch; among repos with equal visits the newest wins. It differs from
+`sv` exactly at the ties, and the ties are most of a bucket: `sv` sends them to
+the alphabet, `sf` leaves them in recency order, so a bucket nobody visited looks
+like `sr` rather than like `sn`.
 
 `--time` and `--activity` are the older spellings of `--recency` and `--visits`
 and still work, as do `LSRECENT_SORT=time` and `=activity`.
@@ -254,16 +303,16 @@ what it had just numbered. It accepts more than a number:
 | Reply | Does |
 | --- | --- |
 | `23` | cd into entry 23 — **numbers are the ranking, not the page** |
-| `text` | search labels and paths for `text`, case-insensitive |
+| `text` | search labels and paths for `text`, case-insensitive, best match first |
 | `/` | clear the search, back to the full ranking |
 | `n` or `+` | next page |
 | `p` or `-` | previous page |
 | `t` | back to the top of the current view |
 | `a` | everything in the current view, unpaged |
-| `s` | cycle the order inside each group: recency → visits → name |
-| `sr` / `sv` / `sn` | go straight to that order — recency, visits, name |
+| `s` | cycle the order inside each group: recency → frecency → visits → name |
+| `sr` / `sf` / `sv` / `sn` | go straight to that order — recency, frecency, visits, name |
 | `?` | the same summary |
-| enter, `q`, ctrl-d | stay put |
+| enter, `q`, ctrl-d | stay put — except that enter takes the **only match** of a search |
 
 Every key the tool offers — here, on the prompt line, in the paging footer — is
 printed in its **own colour**, distinct from the prose describing it, and the
@@ -281,12 +330,26 @@ $ ls
   1 Driving-Checklists  2 HVAC_Repair_0726     3 lsrecent
  …
 … 238 more, numbered 21-258 · n pages to them, lsrepos --all prints them
-→ number, text to search, n/p pages, s sort, ? help, enter stays: noisy
+→ number · text to search · n/p pages · s sort (recency) · ? help · enter stays: noisy
  79 noisycity-api-blueprint
-… 1-1 of 1 matching "noisy" · end
-→ number, text to search, n/p pages, s sort, ? help, enter stays: 79
+… the only match · enter goes there · / clears the search
+→ number · text to search · n/p pages · s sort (recency) · ? help · enter stays:
 /home/you/repos/github/smart-home/noisycity-api-blueprint
 ```
+
+**Results are ranked, and the match is lit up.** Four tiers, best first: the whole
+name, then names starting with what you typed, then names containing it, then
+entries whose *path* matched but whose name did not. Inside a tier the listing's
+own order survives, so the best answer is at the top and the rest are still
+newest-first underneath it. The characters that matched are highlighted inside the
+name — and a row with no highlight is telling you it is here on its path, not its
+name. Typing `wms` and finding `Wheres-My-Stuff` fourth, under three repos whose
+paths happen to contain those letters, is a search failing while appearing to
+work.
+
+**One match left standing, and enter takes it.** Otherwise enter still means stay
+put, and `q` and ctrl-d always do — the offer is only ever made on the footer line
+that says so.
 
 `79` was never on screen. The search matches the path as well as the label, so a
 topic name (`smart-home`) collects everything filed under it even though the topic

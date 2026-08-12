@@ -15,13 +15,24 @@
 #   lsrecent pick [root]     fzf picker over repos; prints the chosen path
 #                            (use the `lsrp` / `lsrt` / `lsry` functions to cd)
 #
+# Searching from the command line. A positional argument written like a path — it
+# has a slash in it, or it is `.` or `..` — is the root. Anything else is a search
+# over repository names and paths, and the listing is reduced to what matches
+# before it is bucketed, so it prints as an ordinary grouped listing numbered from
+# 1:
+#   lsrepos wms              every repo matching "wms", grouped by recency
+#   lstoday claude           today's, narrowed
+#   lsr wms                  the same, by the shortest route
+# A search matching exactly one repository does not bother asking: it prints the
+# match and cds there. `lsr ./wms` still means the directory.
+#
 # Buckets. The last week is one bucket per calendar day — TODAY, YESTERDAY, then
 # 2 DAYS AGO through 7 DAYS AGO — and then PAST MONTH, PAST 3 MONTHS and OLDER. A
 # repo has one timestamp, so it appears under exactly one of them.
 #
-# Ordering. Groups run newest-first. Within a group the order is one of three;
-# `s` at the prompt cycles them and `sr`/`sv`/`sn` jump straight to one, without
-# leaving the listing:
+# Ordering. Groups run newest-first. Within a group the order is one of four;
+# `s` at the prompt cycles them and `sr`/`sf`/`sv`/`sn` jump straight to one,
+# without leaving the listing:
 #   --recency  (-t)  most recently opened first — the default, and what TODAY is
 #                    usually being read for: the last thing you were in is the
 #                    first line on the screen. (--time is the old spelling.)
@@ -29,9 +40,14 @@
 #                    opening it inside that bucket's own day. The day you touched
 #                    forty repos becomes the four you actually worked in.
 #                    (--activity is the old spelling.)
+#   --frecency (-f)  visits first, most recent breaking the ties. Neither signal
+#                    alone is the question: the repo you opened nine times today
+#                    beats the one you opened once at lunch, and among equals the
+#                    newest wins. A bucket nobody visited is all zeroes, so it
+#                    stays in recency order rather than collapsing to the alphabet.
 #   --name     (-n)  alphabetical — a bucket you scan for a name you already have
 #                    in mind
-# LSRECENT_SORT=recency|visits|name sets the default.
+# LSRECENT_SORT=recency|frecency|visits|name sets the default.
 #
 # Bulk touches. A repo's date is inferred from the filesystem when the visit log
 # has nothing newer, and one command run across every repo — a mass fetch, a
@@ -59,13 +75,16 @@
 # The prompt is also a browser, so the screenful is never the limit of what you
 # can reach from it:
 #   23        cd into entry 23 — numbers are the ranking, not the page
-#   text      search labels and paths, case-insensitive; a bare word is a search
+#   text      search labels and paths, case-insensitive; a bare word is a search.
+#             Results are ranked — whole name, then starts-with, then contains,
+#             then path-only — and the matched characters are highlighted inside
+#             the name. One match left standing: enter goes there.
 #   /         clear the search, back to the full ranking
 #   n  or +   next page                 p  or -   previous page
 #   t         back to the top of this view
 #   a         everything in this view, unpaged
-#   s         cycle the order inside each group: recency → visits → name
-#   sr        sort by recency           sv  by visits        sn  by name
+#   s         cycle the order inside each group: recency → frecency → visits → name
+#   sr  recency    sf  frecency    sv  visits    sn  name
 #   ?         the same summary          enter, q, ctrl-d   stay put
 #
 # Every one of those keys prints in its own colour, distinct from the prose
@@ -113,7 +132,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.12.0"
+VERSION="1.13.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -154,11 +173,13 @@ if [[ "${TERM:-}" == *256color* || "${TERM:-}" == *direct* || -n "${COLORTERM:-}
     C_KEY=$'\e[1;38;5;51m'      # the characters you actually type
     C_NOW=$'\e[1;38;5;120m'     # the current setting a key toggles
     C_DIM=$'\e[38;5;244m'       # separators, brackets, arrows
+    C_MATCH=$'\e[1;30;48;5;220m' # the characters a search matched, inside a name
 else
     C_HINT=$'\e[33m'
     C_KEY=$'\e[1;36m'
     C_NOW=$'\e[1;32m'
     C_DIM=$'\e[90m'
+    C_MATCH=$'\e[1;30;43m'
 fi
 C_OFF=$'\e[0m'
 
@@ -742,8 +763,11 @@ pack_numbered() {
         (( ++sel_n ))
         sel_paths[sel_n]=$path
         sel_names[sel_n]=$n
-        printf '\e[90m%*d\e[0m \e[01;34m%-*s\e[0m' \
-            "$pn_numw" "$sel_n" "$pn_namew" "$n"
+        printf '\e[90m%*d\e[0m ' "$pn_numw" "$sel_n"
+        # Lit up here as well as in the browser: a listing narrowed by a search on
+        # the command line is the same answer arriving by a different door, and the
+        # part that matched is the reason each row is on the screen.
+        print_label "$n" "$list_filter" "$pn_namew"
         (( ++i % pn_per == 0 )) && printf '\n'
     done
     (( i % pn_per )) && printf '\n'
@@ -876,20 +900,59 @@ view_filter=''
 # one" started once view_from has moved past its end.
 page_start=0
 
+# How well a repo answers what you typed. Sets `match_tier` — 0 for no match,
+# then 1 (best) to 4 — rather than echoing it, because this runs once per entry
+# and a command substitution there is a fork per repo.
+#
+# Label and path are both searched: "noisy" should find the repo, and
+# "smart-home" should find everything filed under that topic even though the
+# topic is only part of some labels. But they are not equally good answers, which
+# is the whole point of the tiers. Typing `wms` at a listing of 315 repositories
+# and getting `Wheres-My-Stuff` fourth, under three repos whose *paths* happen to
+# contain the letters, is the search failing while appearing to work.
+#
+# The needle must already be lowercased by the caller — done once there rather
+# than 315 times here.
+match_tier=0
+match_tier() {
+    local label=$1 path=$2 needle=$3 low=${1,,}
+    if   [[ "$low" == "$needle" ]];   then match_tier=1   # the whole name
+    elif [[ "$low" == "$needle"* ]];  then match_tier=2   # starts with it
+    elif [[ "$low" == *"$needle"* ]]; then match_tier=3   # contains it
+    elif [[ "${path,,}" == *"$needle"* ]]; then match_tier=4   # only the path does
+    else match_tier=0
+    fi
+    (( match_tier ))
+}
+
+# The view, ranked when there is a search and in listing order when there is not.
+#
+# Ranking is four passes rather than a sort: it costs no fork, and within a tier
+# the listing's own order survives — so the best match is at the top and the rest
+# are still newest-first (or whatever `s` last chose) underneath it, instead of
+# being re-shuffled by a scoring function nobody can see.
 build_view() {
     view=()
-    local i hay needle=${view_filter,,}
-    for (( i = 1; i <= sel_n; i++ )); do
-        [[ -n "${sel_names[i]:-}" ]] || continue
-        if [[ -n "$needle" ]]; then
-            # Label and path both, lowercased: "noisy" should find the repo, and
-            # "smart-home" should find everything filed under that topic even
-            # though the topic is only part of some labels.
-            hay=${sel_names[i],,}$'\n'${sel_paths[i],,}
-            [[ "$hay" == *"$needle"* ]] || continue
-        fi
-        view+=( "$i" )
-    done
+    local i needle=${view_filter,,}
+    if [[ -z "$needle" ]]; then
+        for (( i = 1; i <= sel_n; i++ )); do
+            [[ -n "${sel_names[i]:-}" ]] || continue
+            view+=( "$i" )
+        done
+    else
+        local -a tier1=() tier2=() tier3=() tier4=()
+        for (( i = 1; i <= sel_n; i++ )); do
+            [[ -n "${sel_names[i]:-}" ]] || continue
+            match_tier "${sel_names[i]}" "${sel_paths[i]}" "$needle" || continue
+            case $match_tier in
+                1) tier1+=( "$i" ) ;;
+                2) tier2+=( "$i" ) ;;
+                3) tier3+=( "$i" ) ;;
+                *) tier4+=( "$i" ) ;;
+            esac
+        done
+        view=( "${tier1[@]}" "${tier2[@]}" "${tier3[@]}" "${tier4[@]}" )
+    fi
     view_from=0
     page_start=0
     plan_view_layout
@@ -927,6 +990,30 @@ plan_view_layout() {
     return 0
 }
 
+# One entry's label, padded to $3, with the part that matched $2 lit up. Without
+# the highlight a filtered listing is a list of names that all look equally like
+# an answer, and the reason a row is there — which for a path-only match is not
+# in the row at all — has to be reconstructed by reading. With it, the answer is
+# where your eye already is.
+#
+# The padding is done here rather than by `%-*s` because the label is printed in
+# three pieces and the escape sequences between them would be counted as width.
+# A path-only match has nothing to light up in the label, so it prints plain: the
+# absence of a highlight is itself the signal that the name did not match.
+print_label() {
+    local label=$1 needle=$2 width=$3 low=${1,,} pre
+    if [[ -z "$needle" || "$low" != *"$needle"* ]]; then
+        printf '\e[01;34m%-*s\e[0m' "$width" "$label"
+        return 0
+    fi
+    pre=${low%%"$needle"*}
+    printf '\e[01;34m%s\e[0m%s%s\e[0m\e[01;34m%s\e[0m%*s' \
+        "${label:0:${#pre}}" \
+        "$C_MATCH" "${label:${#pre}:${#needle}}" \
+        "${label:$(( ${#pre} + ${#needle} ))}" \
+        "$(( width - ${#label} ))" ''
+}
+
 # Print one page of `view` starting at view_from, and advance it. With $1 set,
 # print the lot regardless of the row budget.
 render_page() {
@@ -942,11 +1029,11 @@ render_page() {
     [[ -n "$unlimited" ]] || (( vp_page == 0 || vp_page >= cap )) || cap=$vp_page
 
     page_start=$view_from
-    local i n printed=0
+    local i n printed=0 needle=${view_filter,,}
     for (( i = view_from; i < view_from + cap; i++ )); do
         n=${view[i]}
-        printf '\e[90m%*d\e[0m \e[01;34m%-*s\e[0m' \
-            "$vp_numw" "$n" "$vp_namew" "${sel_names[n]}" > /dev/tty
+        printf '\e[90m%*d\e[0m ' "$vp_numw" "$n" > /dev/tty
+        print_label "${sel_names[n]}" "$needle" "$vp_namew" > /dev/tty
         (( ++printed % vp_per == 0 )) && printf '\n' > /dev/tty
     done
     (( printed % vp_per )) && printf '\n' > /dev/tty
@@ -955,6 +1042,16 @@ render_page() {
     view_from=$last
     local scope='' nav
     [[ -n "$view_filter" ]] && scope="${C_HINT} matching ${C_NOW}\"$view_filter\""
+    # A search that leaves exactly one repository has already answered the
+    # question, and making you read its number off the screen and type it back is
+    # the one thing this prompt exists not to do. Enter takes it. Enter otherwise
+    # still means "stay put", so the offer is only ever made on the line that
+    # explains it — never silently.
+    if [[ -n "$view_filter" ]] && (( total == 1 )); then
+        printf "${C_DIM}… ${C_HINT}the only match${C_DIM} · ${C_KEY}enter${C_HINT} goes there${C_DIM} · ${C_KEY}/${C_HINT} clears the search${C_OFF}\n" \
+            > /dev/tty
+        return 0
+    fi
     if (( view_from < total )); then
         printf -v nav "${C_DIM} · ${C_KEY}n${C_HINT} for the next %d" \
             "$(( total - view_from < printed ? total - view_from : printed ))"
@@ -991,8 +1088,9 @@ browse_help() {
     help_row 'p  -' 'previous page'
     help_row 't'    'back to the top of this view'
     help_row 'a'    'everything in this view, unpaged'
-    help_row 's'    "cycle the order: recency → visits → name"
+    help_row 's'    "cycle the order: recency → frecency → visits → name"
     help_sort_row 'sr' time
+    help_sort_row 'sf' frecency
     help_sort_row 'sv' activity
     help_sort_row 'sn' name
     help_row '?'    'this'
@@ -1034,7 +1132,17 @@ browse() {
         IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
 
         case "$reply" in
-            ''|q|Q)
+            '')
+                # Enter is "stay put", except where the screen has just said it is
+                # not: one match left standing by a search is an answer, not a
+                # list. `q` and ctrl-d stay put unconditionally, so there is always
+                # a way out that does not move you.
+                if [[ -n "$view_filter" ]] && (( ${#view[@]} == 1 )); then
+                    reply=${view[0]}
+                else
+                    return 0
+                fi ;;
+            q|Q)
                 return 0 ;;
             '?')
                 browse_help; continue ;;
@@ -1071,7 +1179,8 @@ browse() {
                 # press of `s` is always "not recency" and the third press is home
                 # again.
                 case "$sort_mode" in
-                    time)     sort_mode=activity ;;
+                    time)     sort_mode=frecency ;;
+                    frecency) sort_mode=activity ;;
                     activity) sort_mode=name ;;
                     *)        sort_mode=time ;;
                 esac
@@ -1085,6 +1194,8 @@ browse() {
                 sort_mode=time;     resort; continue ;;
             sv|SV|sa|SA|visits|busiest)
                 sort_mode=activity; resort; continue ;;
+            sf|SF|frecency)
+                sort_mode=frecency; resort; continue ;;
             sn|SN|alpha)
                 sort_mode=name;     resort; continue ;;
             /)
@@ -1152,7 +1263,7 @@ cmd_show() {
         case "$1" in
             # Only meaningful when this delegates to cmd_repos below; a directory
             # listed as its own children is laid out by `ls`, which has its own.
-            --all|-a|--time|--recency|-t|--name|-n|--activity|--visits|-A)
+            --all|-a|--time|--recency|-t|--name|-n|--activity|--visits|-A|--frecency|-f)
                       passthru+=("$1") ;;
             -*)       die "unknown option: $1" ;;
             *)        target=$1 ;;
@@ -1160,6 +1271,14 @@ cmd_show() {
         shift
     done
     [[ -n "$target" ]] || target="."
+    # `lsr wms` — a bare word that is not a directory here is a repository search,
+    # handed to the repo view against the default root. It is the shortest thing
+    # to type, so it should be the thing that works; `lsr ./wms` still means the
+    # directory. Same rule as cmd_repos, which owns the search itself.
+    if [[ ! -d "$target" && "$target" != */* && "$target" != . && "$target" != .. ]]; then
+        cmd_repos "${passthru[@]}" "$target"
+        return
+    fi
     [[ -d "$target" ]] || die "not a directory: $target"
 
     # A directory that only groups repositories is more useful listed as
@@ -1270,6 +1389,11 @@ lr_root=""
 lr_cols=80
 lr_no_limit=0
 
+# A search term given on the command line — `lsrepos wms` — held lowercased,
+# because match_tier expects the needle that way and this one is compared against
+# every repo in the tree.
+list_filter=''
+
 # Fill the buckets from repo_ts, newest-first within each. Entries are
 # "display<TAB>abspath": the display name drops the topic folder unless --full,
 # but the number has to resolve to a real path, and sorted_repos yields paths
@@ -1291,6 +1415,12 @@ bucket_repos() {
         [[ -n "$rel" ]] || continue
         in_window "$ts" || continue
         if (( full )); then name=$rel; else name=${rel##*/}; fi
+        # A search given on the command line reduces the set *before* bucketing, so
+        # what prints is an ordinary grouped listing that happens to contain only
+        # matches — numbered from 1, under the same headers, answered by the same
+        # prompt. Filtering in the browser instead would mean numbering 315 repos
+        # in order to show four of them.
+        [[ -z "$list_filter" ]] || match_tier "$name" "$root/$rel" "$list_filter" || continue
         entry="$name"$'\t'"$root/$rel"
         # The last week gets one bucket per calendar day rather than a single PAST
         # WEEK. "Today or yesterday?" was always the question being asked, and it
@@ -1351,13 +1481,21 @@ declare -a ord_count=()
 # as well. The bucket index leads the sort key, so a single pass cannot mix two
 # buckets together however the rest of the key compares.
 #
-# Key: bucket, then score descending, then the display label case-folded. The
-# label, never the whole line — the path after it would otherwise decide ties by
-# topic folder, so two repos with the same name would sort apart from where their
-# names put them. (Under --full the label *is* topic/repo and sorts by topic
+# The stream is "bucket, score, position, label, path" and the sort key picks from
+# it: bucket always leads, then
+#   name      the display label, case-folded
+#   visits    score descending, then the label
+#   frecency  score descending, then position — where position is the entry's
+#             index in the bucket as built, which is newest-first, so this is
+#             "busiest, most recent breaking the ties"
+# The label, never the whole line — the path after it would otherwise decide ties
+# by topic folder, so two repos with the same name would sort apart from where
+# their names put them. (Under --full the label *is* topic/repo and sorts by topic
 # anyway.) Ties falling to the name is what makes the busiest-first view of a
 # bucket nobody visited identical to the alphabetical one, rather than an
-# arbitrary order that changes between listings.
+# arbitrary order that changes between listings — and it is exactly that property
+# frecency gives up on purpose: a bucket nobody visited is all zeroes, so under
+# frecency it stays in recency order rather than collapsing to the alphabet.
 order_listing() {
     ord_entries=(); ord_start=(); ord_count=()
     local i ref e n=0
@@ -1375,19 +1513,27 @@ order_listing() {
         return 0
     fi
 
+    local -a key=()
+    case "$sort_mode" in
+        activity) key=( -k1,1n -k2,2nr -k4,4f ) ;;
+        frecency) key=( -k1,1n -k2,2nr -k3,3n ) ;;
+        *)        key=( -k1,1n -k4,4f ) ;;
+    esac
+
     local -a flat=()
     mapfile -t flat < <(
         for i in "${!group_vars[@]}"; do
             ref="${group_vars[$i]}[@]"
+            local pos=0
             for e in "${!ref}"; do
-                if [[ "$sort_mode" == activity ]]; then
-                    activity_since "${group_cutoff[$i]}" "${e#*$'\t'}"
-                else
+                if [[ "$sort_mode" == name ]]; then
                     activity=0
+                else
+                    activity_since "${group_cutoff[$i]}" "${e#*$'\t'}"
                 fi
-                printf '%s\t%s\t%s\n' "$i" "$activity" "$e"
+                printf '%s\t%s\t%s\t%s\n' "$i" "$activity" "$(( pos++ ))" "$e"
             done
-        done | sort -t$'\t' -k1,1n -k2,2nr -k3,3f
+        done | sort -t$'\t' "${key[@]}"
     )
 
     # Back into slices. The stream is already grouped by bucket, so this is one
@@ -1400,8 +1546,9 @@ order_listing() {
         i=${e%%$'\t'*}
         (( ord_count[$i] )) || ord_start[$i]=$n
         (( ord_count[$i]++ ))
-        e=${e#*$'\t'}         # bucket index
-        ord_entries+=("${e#*$'\t'}")   # score
+        e=${e#*$'\t'}                  # bucket index
+        e=${e#*$'\t'}                  # score
+        ord_entries+=("${e#*$'\t'}")   # position
         (( n++ ))
     done
     return 0
@@ -1415,6 +1562,7 @@ sort_label() {
     case "${1:-$sort_mode}" in
         time)     echo "recency" ;;
         activity) echo "visits" ;;
+        frecency) echo "frecency" ;;
         *)        echo "name" ;;
     esac
 }
@@ -1423,6 +1571,7 @@ sort_desc() {
     case "${1:-$sort_mode}" in
         time)     echo "most recently opened first" ;;
         activity) echo "busiest first, inside the bucket's own day" ;;
+        frecency) echo "busiest first, most recent breaking the ties" ;;
         *)        echo "alphabetical" ;;
     esac
 }
@@ -1537,15 +1686,32 @@ noise_footer() {
     fi
 }
 
+# A command-line search that leaves exactly one repository standing has already
+# answered the question. Printing it, then asking which of the one you meant, is
+# the retype-what-is-on-the-screen step this tool exists to remove — so the
+# listing lands in the scrollback as usual and the shell is handed the path.
+# Requires the cd file: without a shell function to act on it there is nothing to
+# hand the path to, and the prompt's own notice about that is the better message.
+jump_single() {
+    [[ -n "$list_filter" ]] || return 1
+    (( sel_n == 1 )) || return 1
+    local dest=${LSRECENT_CD_FILE:-} d=${sel_paths[1]}
+    [[ -n "$dest" && -d "$d" ]] || return 1
+    printf "${C_DIM}→ ${C_HINT}the only match${C_DIM} · ${C_OFF}%s\n" "$d"
+    printf '%s\n' "$d" > "$dest" 2>/dev/null
+    return 0
+}
+
 cmd_repos() {
     local want_window="" full=0 root=""
     # Set before the loop, so an explicit flag on the command line still wins.
     case "${LSRECENT_SORT:-}" in
         time|recency|recent) sort_mode=time ;;
         activity|visits)     sort_mode=activity ;;
+        frecency)            sort_mode=frecency ;;
         name)                sort_mode=name ;;
         '')                  sort_mode=time ;;
-        *)                   die "LSRECENT_SORT must be recency, visits or name: $LSRECENT_SORT" ;;
+        *)                   die "LSRECENT_SORT must be recency, visits, frecency or name: $LSRECENT_SORT" ;;
     esac
     lr_no_limit=0
     while (( $# )); do
@@ -1557,8 +1723,17 @@ cmd_repos() {
             --time|--recency|-t)     sort_mode=time ;;
             --name|-n)               sort_mode=name ;;
             --activity|--visits|-A)  sort_mode=activity ;;
+            --frecency|-f)           sort_mode=frecency ;;
             -*)            die "unknown option: $1" ;;
-            *)             root=$1 ;;
+            # A positional is a root if it is written like a path — it contains a
+            # slash, or it is `.` / `..` — and a search term otherwise. Deciding by
+            # `-d` instead would have made the meaning of `lsrepos smart-home`
+            # depend on which directory you happened to be standing in, and would
+            # have read a bare repo name as a root the moment one existed beside
+            # you. Typing a name at a tool whose whole job is jumping to repos by
+            # name means the name; `./x` is how you say you meant the directory.
+            */*|.|..)      root=$1 ;;
+            *)             list_filter=${1,,} ;;
         esac
         shift
     done
@@ -1575,10 +1750,15 @@ cmd_repos() {
     bucket_repos "$root" "$full"
 
     if render_listing; then
-        prompt_jump
+        jump_single || prompt_jump
         return 0
     fi
 
+    if [[ -n "$list_filter" ]]; then
+        printf "${C_HINT}no repository matches ${C_NOW}\"%s\"${C_HINT} under %s${C_OFF}\n" \
+            "$list_filter" "$root"
+        return 1
+    fi
     if [[ -n "$window" ]]; then
         printf "${C_HINT}No repos opened %s under %s${C_OFF}\n" "$window" "$root"
         [[ -s "$visit_log" ]] || printf "${C_HINT}The visit log is empty — it starts filling once the shell hook is loaded (open a new shell).${C_OFF}\n"

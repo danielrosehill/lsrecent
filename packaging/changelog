@@ -1,3 +1,27 @@
+lsrecent (1.13.0) unstable; urgency=low
+
+  * A positional argument that is not written like a path is now a search rather
+    than an error: `lsrepos wms`, `lsr wms`, `lstoday claude`. The set is reduced
+    before bucketing, so it prints as an ordinary grouped listing containing only
+    matches, numbered from 1 and answered by the same prompt. An argument with a
+    slash in it, or `.` / `..`, is still the root — deciding by `-d` instead would
+    have made `lsrepos smart-home` mean different things depending on where you
+    were standing.
+  * A search that matches exactly one repository cds there instead of asking. At
+    the prompt, enter takes the only match of a search; enter otherwise still
+    means stay put, and `q` and ctrl-d always do.
+  * Prompt searches are ranked in four tiers — whole name, starts-with, contains,
+    path-only — and the matched characters are highlighted inside the name. Before
+    this, `wms` could return `Wheres-My-Stuff` fourth, under three repos whose
+    paths happened to contain the letters, with nothing on screen saying why any
+    row was there.
+  * A fourth order: `--frecency` (`-f`), `sf` at the prompt. Visits first, most
+    recent breaking the ties. It differs from `--visits` exactly at the ties, and
+    the ties are most of a bucket: `--visits` sends them to the alphabet, this
+    leaves them in recency order.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Thu, 13 Aug 2026 00:20:00 +0300
+
 lsrecent (1.12.0) unstable; urgency=low
 
   * The default order inside a bucket is most-recent-first again, not
