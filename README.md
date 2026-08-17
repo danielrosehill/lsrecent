@@ -163,7 +163,7 @@ So **`lsrecent [dir]` picks the unit for you**:
 ```
 ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   1 Cloud-Mounts        2 Driving-Checklists   3 HVAC_Repair_0726
-  4 lsrecent            5 MCPJungle-Gateway    6 Twilio-Manager
+  4 lsrecent            5 AI-Gateway-Manager    6 Twilio-Manager
 
 ━━ 3 DAYS AGO ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
  31 DSR-Holdings-Cloud  32 dsrholdings-accounting-plugin   ...
