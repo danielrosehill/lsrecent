@@ -1,3 +1,23 @@
+lsrecent (1.15.0) unstable; urgency=low
+
+  * Busy-day focus. When TODAY holds at least `focus_today` repos (default 10),
+    the plain listing shows today and nothing else, and enter at the prompt
+    prints the next page of today instead of staying put; `q` stays. Once today
+    runs out, enter stays as before. The older repos are still numbered after
+    today's, `n` pages on to them and `lsrepos --all` prints everything. Never
+    applies to a search, a timeframe, --today/--yesterday or --all.
+    `lsrecent config set focus_today 0` turns it off.
+  * Repo names print with hyphens and underscores as spaces ("Wheres My Stuff"),
+    `pretty_names` (default 1). Display only. Search folds hyphen, underscore
+    and space together, so "wheres my" and "wheres-my" both find it.
+  * Timeframes: `--since today|yesterday|week|month|3d|2w|1m` on the command
+    line (`lsrepos --since 3d claude`), and `@today claude`, `@3d`, `@2w x` at
+    the prompt; `@` alone drops the timeframe, `/` clears both. Calendar days,
+    today included, cut over the listing's own dates rather than the visit log
+    alone, so `@today` keeps exactly what is under the TODAY header.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Mon, 02 Nov 2026 14:30:00 +0200
+
 lsrecent (1.14.0) unstable; urgency=low
 
   * A settings file, ${XDG_CONFIG_HOME:-~/.config}/lsrecent/config, holding the

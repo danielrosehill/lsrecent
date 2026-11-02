@@ -24,7 +24,24 @@
 #   lstoday claude           today's, narrowed
 #   lsr wms                  the same, by the shortest route
 # A search matching exactly one repository does not bother asking: it prints the
-# match and cds there. `lsr ./wms` still means the directory.
+# match and cds there. `lsr ./wms` still means the directory. Hyphens, underscores
+# and spaces match each other, so "wheres my" finds Wheres-My-Stuff.
+#
+# Timeframes. --since SPEC (or --within) keeps only repos touched in the last
+# stretch of calendar days, today included, and combines with a search:
+#   lsrepos --since today claude    today's repos matching "claude"
+#   SPEC: today, yesterday, week, month, N or Nd (days), Nw, Nm
+# Unlike --today, which reads the visit log alone, this cuts over the listing's
+# own dates, so --since today is exactly what sits under TODAY.
+#
+# Busy days. When TODAY holds at least focus_today repos (default 10), the plain
+# listing shows only today, and enter at the prompt prints more of today instead
+# of staying put (q stays). Older repos are still numbered after today's, and n
+# pages on to them. A search, a timeframe, --today or --all turns it off for that
+# listing; focus_today = 0 turns it off for good.
+#
+# Names. Repo names print with hyphens and underscores as spaces — Wheres My Stuff
+# for Wheres-My-Stuff — unless pretty_names = 0. Display only.
 #
 # Buckets. The last week is one bucket per calendar day — TODAY, YESTERDAY, then
 # 2 DAYS AGO through 7 DAYS AGO — and then PAST MONTH, PAST 3 MONTHS and OLDER. A
@@ -83,7 +100,9 @@
 #             Results are ranked — whole name, then starts-with, then contains,
 #             then path-only — and the matched characters are highlighted inside
 #             the name. One match left standing: enter goes there.
-#   /         clear the search, back to the full ranking
+#   /         clear the search and any timeframe, back to the full ranking
+#   @3d text  search only what was touched in a timeframe (@today, @yesterday,
+#             @week, @month, @3d, @2w); @ alone drops the timeframe
 #   n  or +   next page                 p  or -   previous page
 #   t         back to the top of this view
 #   a         everything in this view, unpaged
@@ -91,6 +110,7 @@
 #   sr  recency    sf  frecency    sv  visits    sn  name
 #   ss        keep that order — every listing starts in it from now on
 #   ?         the same summary          enter, q, ctrl-d   stay put
+#             (on a busy day, enter shows more of today until today runs out)
 #
 # Every one of those keys prints in its own colour, distinct from the prose
 # describing it, wherever the tool offers it — the prompt line, the help, the
@@ -128,13 +148,16 @@
 #   lsrecent config get <setting>
 #   lsrecent config edit     The file in $EDITOR
 #   lsrecent config path     Where the file is
-# The settings, all of which already existed as LSRECENT_* variables:
+# The settings, each also an LSRECENT_* variable (LSRECENT_FOCUS_TODAY,
+# LSRECENT_PRETTY_NAMES for the last two):
 #   sort        recency, frecency, visits or name
 #   prompt      1 to end a listing with the browser prompt, 0 for listing only
 #   max_rows    rows one listing may occupy, 0 for unlimited
 #   noise_pct   share of repos on one inferred day that makes it a bulk touch
 #   repo_root   where the repositories are
 #   repo_depth  how deep under the root to look for them
+#   focus_today repos opened today that make the listing show only today, 0 = never
+#   pretty_names 1 to show repo-names-like-this as repo names like this
 # A flag beats the environment, the environment beats the file, and the file beats
 # the default — so an export is still how you say "just this shell", and the file
 # is how you say "always". A setting written while the matching variable is
@@ -163,7 +186,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.14.0"
+VERSION="1.15.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -326,6 +349,54 @@ in_window() {
     (( win_hi == 0 || $1 < win_hi ))
 }
 
+# A timeframe, as `--since` on the command line and `@` at the prompt take it,
+# turned into the local midnight it starts at. Sets since_lo and since_label;
+# returns 1 for anything it cannot read.
+#   today (t)            since this morning's midnight
+#   yesterday (y)        yesterday and today
+#   week (w), month (m)  the last 7 / 30 calendar days, today included
+#   N, Nd                the last N calendar days, today included — 1d is today
+#   Nw, Nm               N weeks of 7 days, N months of 30
+# Calendar days rather than hours, because the buckets are calendar days: `@2d`
+# has to mean "TODAY and YESTERDAY", not "since this time on Saturday".
+#
+# Unlike --today and --yesterday, this is a cut over the listing's own dates —
+# the newer of visit and filesystem — not over the visit log alone, so `@today`
+# keeps exactly what is under the TODAY header, and it can be combined with a
+# search: the point is "only the repos I have been touching today, matching x".
+since_lo=0
+since_label=''
+parse_since() {
+    local spec=${1,,} days mid
+    case "$spec" in
+        today|t)          days=1 ;;
+        yesterday|yest|y) days=2 ;;
+        week|w)           days=7 ;;
+        month|m)          days=30 ;;
+        *)
+            [[ "$spec" =~ ^([0-9]+)([dwm]?)$ ]] || return 1
+            days=$(( 10#${BASH_REMATCH[1]} ))
+            case ${BASH_REMATCH[2]} in
+                w) days=$(( days * 7 )) ;;
+                m) days=$(( days * 30 )) ;;
+            esac ;;
+    esac
+    (( days >= 1 )) || return 1
+    mid=$(midnight_epoch)
+    if (( days == 1 )); then
+        since_lo=$mid
+        since_label="today"
+    else
+        # Snapped rather than trusted: k * 86400 back from a midnight is an hour
+        # off when a DST change falls in between, and snap_midnight goes to the
+        # *nearest* midnight, which is the right one.
+        since_lo=$(snap_midnight "$(( mid - (days - 1) * 86400 ))")
+        if (( days == 2 )); then since_label="since yesterday"
+        else since_label="in the last $days days"; fi
+    fi
+    return 0
+}
+
 die() {
     echo "lsrecent: $*" >&2
     exit 1
@@ -433,11 +504,13 @@ declare -A settings_var=(
     [noise_pct]=LSRECENT_NOISE_PCT
     [repo_root]=LSRECENT_REPO_ROOT
     [repo_depth]=LSRECENT_REPO_DEPTH
+    [focus_today]=LSRECENT_FOCUS_TODAY
+    [pretty_names]=LSRECENT_PRETTY_NAMES
 )
 # Printed in this order. Bash hands back the keys of an associative array in its
 # own hash order, which is neither the order they were written in nor stable
 # between values, and a settings listing that reshuffles itself is unreadable.
-settings_keys=( sort prompt max_rows noise_pct repo_root repo_depth )
+settings_keys=( sort prompt max_rows noise_pct repo_root repo_depth focus_today pretty_names )
 
 setting_desc() {
     case $1 in
@@ -447,6 +520,8 @@ setting_desc() {
         noise_pct)  echo "share of repos on one inferred day that makes it a bulk touch" ;;
         repo_root)  echo "where the repositories are" ;;
         repo_depth) echo "how deep under the root to look for them" ;;
+        focus_today)  echo "repos opened today that make the listing show only today" ;;
+        pretty_names) echo "show repo-names-like-this as repo names like this" ;;
     esac
 }
 
@@ -461,6 +536,8 @@ setting_values() {
         noise_pct)  echo "a number from 0 to 100" ;;
         repo_root)  echo "a path" ;;
         repo_depth) echo "a number" ;;
+        focus_today)  echo "a number, 0 to never focus" ;;
+        pretty_names) echo "0 or 1" ;;
     esac
 }
 
@@ -475,6 +552,8 @@ setting_default() {
         noise_pct)  echo "50" ;;
         repo_root)  default_root ;;
         repo_depth) echo "4" ;;
+        focus_today)  echo "10" ;;
+        pretty_names) echo "1" ;;
     esac
 }
 
@@ -489,8 +568,8 @@ setting_check() {
                 recency|recent|time|frecency|visits|activity|name) ;;
                 *) return 1 ;;
             esac ;;
-        prompt)     [[ "$val" == 0 || "$val" == 1 ]] || return 1 ;;
-        max_rows|repo_depth) [[ "$val" =~ ^[0-9]+$ ]] || return 1 ;;
+        prompt|pretty_names) [[ "$val" == 0 || "$val" == 1 ]] || return 1 ;;
+        max_rows|repo_depth|focus_today) [[ "$val" =~ ^[0-9]+$ ]] || return 1 ;;
         noise_pct)  [[ "$val" =~ ^[0-9]+$ ]] && (( 10#$val <= 100 )) || return 1 ;;
         repo_root)  [[ -n "$val" ]] || return 1 ;;
     esac
@@ -568,7 +647,7 @@ ensure_settings() {
         echo "# here, and a flag on the command line wins over both."
         echo "#"
         for k in "${settings_keys[@]}"; do
-            printf '#   %-11s %s — %s\n' "$k" "$(setting_desc "$k")" "$(setting_values "$k")"
+            printf '#   %-14s %s — %s\n' "$k" "$(setting_desc "$k")" "$(setting_values "$k")"
         done
     } > "$settings_file"
     return 0
@@ -650,8 +729,8 @@ settings_show() {
         # One space after the value even when it has overrun its column: a long
         # default like "as many as the screen has" would otherwise be printed
         # welded to the word saying where it came from.
-        printf "  ${C_KEY}%-11s${C_NOW}%-26s ${C_DIM}%s${C_OFF}\n" "$k" "$val" "$origin"
-        printf "  ${C_DIM}%-11s${C_HINT}%s ${C_DIM}— %s${C_OFF}\n" \
+        printf "  ${C_KEY}%-14s${C_NOW}%-26s ${C_DIM}%s${C_OFF}\n" "$k" "$val" "$origin"
+        printf "  ${C_DIM}%-14s${C_HINT}%s ${C_DIM}— %s${C_OFF}\n" \
             '' "$(setting_desc "$k")" "$(setting_values "$k")"
     done
     # No settings_complain here: dispatch has already printed the file's bad
@@ -1235,6 +1314,13 @@ prompt_jump() {
 declare -a view=()
 view_from=0
 view_filter=''
+# A timeframe over the view (`@today`, `@3d` at the prompt): an epoch, 0 for none.
+view_since=0
+view_since_label=''
+# Where the next page has to stop short of the end of the view: set to focus_n
+# while enter is paging through a busy day's TODAY, so that "more" means more of
+# today and the older repos do not spill onto the same page. 0 = the end.
+page_stop=0
 # Where the page most recently printed began. `p` needs it: the page before this
 # one starts one page-length further back, and nothing else records where "this
 # one" started once view_from has moved past its end.
@@ -1251,11 +1337,19 @@ page_start=0
 # and getting `Wheres-My-Stuff` fourth, under three repos whose *paths* happen to
 # contain the letters, is the search failing while appearing to work.
 #
-# The needle must already be lowercased by the caller — done once there rather
-# than 315 times here.
+# The needle must already be folded by the caller (fold_needle) — done once there
+# rather than 315 times here.
+#
+# Hyphens, underscores and spaces are folded to one character on both sides. Labels
+# print as "Wheres My Stuff" when pretty_names is on, and the directory is
+# Wheres-My-Stuff either way; typing what you see, or what the directory is called,
+# has to find it in both cases. The fold is one character for one, so the offsets
+# print_label highlights are the same in the folded and the printed label.
 match_tier=0
 match_tier() {
     local label=$1 path=$2 needle=$3 low=${1,,}
+    low=${low//[-_]/ }
+    path=${path//[-_]/ }
     if   [[ "$low" == "$needle" ]];   then match_tier=1   # the whole name
     elif [[ "$low" == "$needle"* ]];  then match_tier=2   # starts with it
     elif [[ "$low" == *"$needle"* ]]; then match_tier=3   # contains it
@@ -1263,6 +1357,21 @@ match_tier() {
     else match_tier=0
     fi
     (( match_tier ))
+}
+
+fold_needle() {
+    local n=${1,,}
+    printf '%s' "${n//[-_]/ }"
+}
+
+# Whether ranking entry $1 is dated at or after view_since. The date is the one
+# the listing bucketed it by — the visit log alone under lstoday/lsyesterday, the
+# newer of visit and filesystem otherwise — so `@today` at the prompt keeps
+# exactly what is under the TODAY header above it, no more and no fewer.
+entry_since() {
+    local p=${sel_paths[$1]} ts
+    if [[ -n "$window" ]]; then ts=${opened_ts[$p]:-0}; else ts=${repo_ts[$p]:-0}; fi
+    (( ts >= view_since ))
 }
 
 # The view, ranked when there is a search and in listing order when there is not.
@@ -1273,16 +1382,19 @@ match_tier() {
 # being re-shuffled by a scoring function nobody can see.
 build_view() {
     view=()
-    local i needle=${view_filter,,}
+    local i needle
+    needle=$(fold_needle "$view_filter")
     if [[ -z "$needle" ]]; then
         for (( i = 1; i <= sel_n; i++ )); do
             [[ -n "${sel_names[i]:-}" ]] || continue
+            (( view_since == 0 )) || entry_since "$i" || continue
             view+=( "$i" )
         done
     else
         local -a tier1=() tier2=() tier3=() tier4=()
         for (( i = 1; i <= sel_n; i++ )); do
             [[ -n "${sel_names[i]:-}" ]] || continue
+            (( view_since == 0 )) || entry_since "$i" || continue
             match_tier "${sel_names[i]}" "${sel_paths[i]}" "$needle" || continue
             case $match_tier in
                 1) tier1+=( "$i" ) ;;
@@ -1300,7 +1412,9 @@ build_view() {
 
 # Column widths and page length for the current view, measured over the whole of
 # it rather than over the slice about to be printed, and once per view rather
-# than once per page.
+# than once per page. With $1, over only the first $1 entries: a busy day's TODAY
+# is paged by enter as a region of its own, and measured against seven hundred
+# labels it would print one long name per row.
 #
 # That is what makes paging reversible. Sized off the visible slice, the number of
 # entries on a page depended on the longest label still *ahead* of it, so page
@@ -1313,8 +1427,9 @@ vp_numw=2
 vp_namew=2
 vp_page=0   # entries per page; 0 = no budget, the whole view is one page
 plan_view_layout() {
-    local i label max=0 cols budget
-    for (( i = 0; i < ${#view[@]}; i++ )); do
+    local i label max=0 cols budget lim=${1:-${#view[@]}}
+    (( lim > ${#view[@]} )) && lim=${#view[@]}
+    for (( i = 0; i < lim; i++ )); do
         label=${sel_names[${view[i]}]}
         (( ${#label} > max )) && max=${#label}
     done
@@ -1342,6 +1457,8 @@ plan_view_layout() {
 # absence of a highlight is itself the signal that the name did not match.
 print_label() {
     local label=$1 needle=$2 width=$3 low=${1,,} pre
+    low=${low//[-_]/ }
+    needle=${needle//[-_]/ }
     if [[ -z "$needle" || "$low" != *"$needle"* ]]; then
         printf '\e[01;34m%-*s\e[0m' "$width" "$label"
         return 0
@@ -1360,12 +1477,19 @@ render_page() {
     local unlimited=${1:-}
     local total=${#view[@]}
     if (( total == 0 )); then
-        printf "${C_HINT}nothing matches ${C_NOW}\"%s\"${C_DIM} — ${C_KEY}/${C_HINT} on its own clears the search${C_OFF}\n" \
-            "$view_filter" > /dev/tty
+        if [[ -n "$view_filter" ]]; then
+            printf "${C_HINT}nothing matches ${C_NOW}\"%s\"%s${C_DIM} — ${C_KEY}/${C_HINT} on its own clears the search${C_OFF}\n" \
+                "$view_filter" "${view_since_label:+ ${view_since_label}}" > /dev/tty
+        else
+            printf "${C_HINT}nothing touched ${C_NOW}%s${C_DIM} — ${C_KEY}@${C_HINT} on its own clears the timeframe${C_OFF}\n" \
+                "$view_since_label" > /dev/tty
+        fi
         return 0
     fi
 
-    local cap=$(( total - view_from ))
+    local stop=$total
+    (( page_stop > 0 && page_stop < total )) && stop=$page_stop
+    local cap=$(( stop - view_from ))
     [[ -n "$unlimited" ]] || (( vp_page == 0 || vp_page >= cap )) || cap=$vp_page
 
     page_start=$view_from
@@ -1382,12 +1506,27 @@ render_page() {
     view_from=$last
     local scope='' nav
     [[ -n "$view_filter" ]] && scope="${C_HINT} matching ${C_NOW}\"$view_filter\""
+    [[ -n "$view_since_label" ]] && scope+="${C_HINT} touched ${C_NOW}$view_since_label"
+    # Paging through a busy day's TODAY with enter: say how much of today is left,
+    # and that enter is still the key, until today runs out.
+    if (( page_stop > 0 )); then
+        if (( view_from < page_stop )); then
+            printf -v nav "${C_DIM} · ${C_KEY}enter${C_HINT} for the next %d" \
+                "$(( page_stop - view_from < printed ? page_stop - view_from : printed ))"
+        else
+            nav="${C_DIM} · ${C_HINT}that is all of today${C_DIM} · ${C_KEY}n${C_HINT} goes on to older ones"
+        fi
+        (( page_start > 0 )) && nav+="${C_DIM} · ${C_KEY}p${C_HINT} for the page before"
+        printf "${C_DIM}… ${C_NOW}%d-%d${C_HINT} of ${C_NOW}%d${C_HINT} today%s${C_OFF}\n" \
+            "$first" "$last" "$page_stop" "$nav" > /dev/tty
+        return 0
+    fi
     # A search that leaves exactly one repository has already answered the
     # question, and making you read its number off the screen and type it back is
     # the one thing this prompt exists not to do. Enter takes it. Enter otherwise
     # still means "stay put", so the offer is only ever made on the line that
     # explains it — never silently.
-    if [[ -n "$view_filter" ]] && (( total == 1 )); then
+    if [[ -n "$view_filter$view_since_label" ]] && (( total == 1 )); then
         printf "${C_DIM}… ${C_HINT}the only match${C_DIM} · ${C_KEY}enter${C_HINT} goes there${C_DIM} · ${C_KEY}/${C_HINT} clears the search${C_OFF}\n" \
             > /dev/tty
         return 0
@@ -1423,7 +1562,9 @@ help_sort_row() {
 browse_help() {
     help_row '23'   'cd into entry 23 — numbers are the ranking, not the page'
     help_row 'text' 'search labels and paths for "text" (case-insensitive)'
-    help_row '/'    'clear the search and go back to the full ranking'
+    help_row '/'    'clear the search (and any timeframe), back to the full ranking'
+    help_row '@3d text' 'search only what was touched in a timeframe: @today, @yesterday, @week, @month, @3d, @2w'
+    help_row '@'    'drop the timeframe, keep the search'
     help_row 'n  +' 'next page'
     help_row 'p  -' 'previous page'
     help_row 't'    'back to the top of this view'
@@ -1435,7 +1576,12 @@ browse_help() {
     help_sort_row 'sn' name
     help_row 'ss'   'keep the order in force — every listing starts in it from now on'
     help_row '?'    'this'
-    help_row 'enter q' 'stay put (ctrl-d too)'
+    if (( focus_n )); then
+        help_row 'enter' 'more of today, while there is more — then stay put'
+        help_row 'q'     'stay put (ctrl-d too)'
+    else
+        help_row 'enter q' 'stay put (ctrl-d too)'
+    fi
 }
 
 # Keep the order in force, for every listing from now on. This is the place the
@@ -1465,7 +1611,35 @@ resort() {
     # An unfiltered view continues below the screenful just printed, as it does on
     # entry; a filtered one has its own first result and nothing above the prompt
     # to continue from.
-    if [[ -n "$view_filter" ]]; then render_page; else view_from=$sel_shown; fi
+    if [[ -n "$view_filter$view_since_label" ]]; then render_page; else view_from=$sel_shown; fi
+}
+
+# A page of a busy day's TODAY: laid out over today's labels alone and stopping at
+# its last entry, so "more of today" is exactly that.
+render_today_page() {
+    plan_view_layout "$focus_n"
+    page_stop=$focus_n
+    render_page
+    page_stop=0
+    plan_view_layout
+}
+
+# The first page of the view. On a busy day, with nothing narrowing it, that is
+# the first page of today, so clearing a search lands back where the listing
+# started rather than on a page laid out for all seven hundred.
+render_top() {
+    if (( focus_n && view_since == 0 )) && [[ -z "$view_filter" ]]; then
+        render_today_page
+    else
+        render_page
+    fi
+}
+
+# Whether enter means "more of today" right now: a busy-day listing, nothing
+# narrowing the view, and some of TODAY not yet printed. Everywhere else enter
+# keeps its old meaning, stay put, and the prompt line says which it is.
+enter_pages() {
+    (( focus_n > 0 && view_since == 0 && view_from < focus_n )) && [[ -z "$view_filter" ]]
 }
 
 browse() {
@@ -1481,8 +1655,10 @@ browse() {
         # as a row of buttons with labels rather than as a sentence to be parsed.
         # The order in force is named here too — it is the one piece of state the
         # listing above cannot show, and it decides what the numbers mean.
-        printf "${C_DIM}→ ${C_HINT}number ${C_DIM}· ${C_HINT}text to search ${C_DIM}· ${C_KEY}n${C_DIM}/${C_KEY}p${C_HINT} pages ${C_DIM}· ${C_KEY}s${C_HINT} sort ${C_DIM}(${C_NOW}%s${C_DIM}) · ${C_KEY}?${C_HINT} help ${C_DIM}· ${C_KEY}enter${C_HINT} stays${C_DIM}: ${C_OFF}" \
-            "$(sort_label)" > /dev/tty
+        local enter="${C_KEY}enter${C_HINT} stays"
+        enter_pages && enter="${C_KEY}enter${C_HINT} more of today ${C_DIM}· ${C_KEY}q${C_HINT} stays"
+        printf "${C_DIM}→ ${C_HINT}number ${C_DIM}· ${C_HINT}text to search ${C_DIM}· ${C_KEY}n${C_DIM}/${C_KEY}p${C_HINT} pages ${C_DIM}· ${C_KEY}s${C_HINT} sort ${C_DIM}(${C_NOW}%s${C_DIM}) · ${C_KEY}?${C_HINT} help ${C_DIM}· %s${C_DIM}: ${C_OFF}" \
+            "$(sort_label)" "$enter" > /dev/tty
         # A bare `read` with no reply (EOF from ctrl-d) leaves the cursor mid-line.
         IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
 
@@ -1492,8 +1668,11 @@ browse() {
                 # not: one match left standing by a search is an answer, not a
                 # list. `q` and ctrl-d stay put unconditionally, so there is always
                 # a way out that does not move you.
-                if [[ -n "$view_filter" ]] && (( ${#view[@]} == 1 )); then
+                if [[ -n "$view_filter$view_since_label" ]] && (( ${#view[@]} == 1 )); then
                     reply=${view[0]}
+                elif enter_pages; then
+                    render_today_page
+                    continue
                 else
                     return 0
                 fi ;;
@@ -1518,15 +1697,26 @@ browse() {
                 if (( page_start == 0 )); then
                     printf "${C_HINT}that is the top ${C_DIM}— ${C_HINT}the first page is just above${C_OFF}\n" > /dev/tty
                 else
+                    # Inside a busy day's TODAY, the page before is a page of today,
+                    # sized the way enter sized the one you are leaving.
+                    local in_today=0
+                    (( focus_n && view_since == 0 && page_start <= focus_n )) \
+                        && [[ -z "$view_filter" ]] && in_today=1
+                    (( in_today )) && plan_view_layout "$focus_n"
                     local back=$vp_page
                     (( back > 0 )) || back=$page_start
                     view_from=$(( page_start - back ))
                     (( view_from < 0 )) && view_from=0
-                    render_page
+                    if (( in_today )); then
+                        plan_view_layout
+                        render_today_page
+                    else
+                        render_page
+                    fi
                 fi
                 continue ;;
             t|T|top)
-                view_from=0; render_page; continue ;;
+                view_from=0; render_top; continue ;;
             a|A|all)
                 view_from=0; render_page unlimited; continue ;;
             s|S|sort)
@@ -1556,7 +1746,28 @@ browse() {
             ss|SS|save|keep)
                 save_sort; continue ;;
             /)
-                view_filter=''; build_view; render_page; continue ;;
+                view_filter=''; view_since=0; view_since_label=''
+                build_view; render_top; continue ;;
+            @)
+                view_since=0; view_since_label=''
+                build_view; render_top; continue ;;
+            @*)
+                # `@today`, `@3d`, `@2w claude`: a timeframe, then optionally a
+                # search inside it. A timeframe it cannot read is said rather
+                # than searched for — "@tdoay" is a typo, not a repo name.
+                local spec=${reply#@} text=''
+                if [[ "$spec" == *' '* ]]; then
+                    text=${spec#* }; spec=${spec%% *}
+                    text=${text#"${text%%[![:space:]]*}"}
+                fi
+                if ! parse_since "$spec"; then
+                    printf "${C_HINT}not a timeframe: ${C_NOW}%s${C_DIM} — ${C_KEY}@today${C_DIM}, ${C_KEY}@yesterday${C_DIM}, ${C_KEY}@week${C_DIM}, ${C_KEY}@3d${C_DIM}, ${C_KEY}@2w${C_DIM}, ${C_HINT}then optional text${C_OFF}\n" \
+                        "$spec" > /dev/tty
+                    continue
+                fi
+                view_since=$since_lo; view_since_label=$since_label
+                view_filter=$text
+                build_view; render_page; continue ;;
         esac
 
         # A leading slash is accepted but not required. Bare text is the more
@@ -1620,8 +1831,10 @@ cmd_show() {
         case "$1" in
             # Only meaningful when this delegates to cmd_repos below; a directory
             # listed as its own children is laid out by `ls`, which has its own.
-            --all|-a|--time|--recency|-t|--name|-n|--activity|--visits|-A|--frecency|-f)
+            --all|-a|--time|--recency|-t|--name|-n|--activity|--visits|-A|--frecency|-f|--since=*|--within=*)
                       passthru+=("$1") ;;
+            --since|--within)
+                      passthru+=("$1" "${2:-}"); shift ;;
             -*)       die "unknown option: $1" ;;
             *)        target=$1 ;;
         esac
@@ -1745,6 +1958,18 @@ sort_mode=time
 lr_root=""
 lr_cols=80
 lr_no_limit=0
+lr_pretty=1
+
+# Busy-day focus. When TODAY holds at least focus_min repos (the focus_today
+# setting, default 10), the first screen is today and nothing else: on a day you
+# have been in forty repositories the question is "which of today's", and
+# YESTERDAY onwards is a page of answers to a different question pushing it off
+# the screen. focus_n is how many TODAY holds once the listing has decided to
+# focus, 0 when it has not. Nothing is renumbered — the older repos are numbered
+# after today's as always, `n` pages into them and `23` still reaches them — and
+# enter at the prompt shows the next page of *today* rather than staying put.
+focus_min=0
+focus_n=0
 
 # A search term given on the command line — `lsrepos wms` — held lowercased,
 # because match_tier expects the needle that way and this one is compared against
@@ -1771,7 +1996,12 @@ bucket_repos() {
     while IFS=$'\t' read -r ts rel; do
         [[ -n "$rel" ]] || continue
         in_window "$ts" || continue
+        (( since_lo == 0 || ts >= since_lo )) || continue
         if (( full )); then name=$rel; else name=${rel##*/}; fi
+        # Repo-names-like-this read as repo names like this. Display only: the
+        # entry still carries the real path, and searching folds hyphens,
+        # underscores and spaces together, so either spelling finds it.
+        (( lr_pretty )) && name=${name//[-_]/ }
         # A search given on the command line reduces the set *before* bucketing, so
         # what prints is an ordinary grouped listing that happens to contain only
         # matches — numbered from 1, under the same headers, answered by the same
@@ -1946,6 +2176,9 @@ render_listing() {
     local budget=0
     (( lr_no_limit )) || budget=$(row_budget)
 
+    focus_n=0
+    (( focus_min > 0 && ord_count[0] >= focus_min )) && focus_n=${ord_count[0]}
+
     # Print oldest-group-last, stopping when the screen is full. The groups run
     # newest-first, so cutting from the end drops the least interesting buckets
     # whole, and a truncated listing is still the right answer to "what was I
@@ -1962,7 +2195,7 @@ render_listing() {
         # Once anything has been cut, the rest is only counted for the footer:
         # showing a later group after eliding an earlier one would misrepresent
         # the recency order the whole listing is built on.
-        if (( hidden )); then
+        if (( hidden || (focus_n && i > 0) )); then
             hidden=$(( hidden + count ))
             register_hidden "${grp[@]}"
             continue
@@ -2004,7 +2237,16 @@ render_listing() {
 
     (( shown )) || return 1
 
-    if (( hidden )); then
+    if (( focus_n )); then
+        local older=$(( sel_n - focus_n )) more=$(( focus_n - sel_shown ))
+        if (( more > 0 )); then
+            printf "${C_DIM}… ${C_HINT}a busy day, so today only: ${C_NOW}1-%d${C_HINT} of ${C_NOW}%d${C_DIM} · ${C_KEY}enter${C_HINT} for more of today${C_DIM} · ${C_HINT}%d older after them${C_DIM} · ${C_KEY}lsrepos --all${C_HINT} for everything${C_OFF}\n" \
+                "$sel_shown" "$focus_n" "$older"
+        else
+            printf "${C_DIM}… ${C_HINT}a busy day, so today only: all ${C_NOW}%d${C_DIM} · ${C_NOW}%d${C_HINT} older, numbered ${C_NOW}%d-%d${C_DIM} · ${C_KEY}n${C_HINT} pages to them${C_DIM} · ${C_KEY}lsrepos --all${C_HINT} for everything${C_OFF}\n" \
+                "$focus_n" "$older" "$(( focus_n + 1 ))" "$sel_n"
+        fi
+    elif (( hidden )); then
         local hint="lsrepos"
         case "$window" in
             today)     hint="lstoday" ;;
@@ -2060,7 +2302,7 @@ jump_single() {
 }
 
 cmd_repos() {
-    local want_window="" full=0 root=""
+    local want_window="" full=0 root="" since_spec=""
     # Set before the loop, so an explicit flag on the command line still wins.
     case "${LSRECENT_SORT:-}" in
         time|recency|recent) sort_mode=time ;;
@@ -2081,6 +2323,12 @@ cmd_repos() {
             --name|-n)               sort_mode=name ;;
             --activity|--visits|-A)  sort_mode=activity ;;
             --frecency|-f)           sort_mode=frecency ;;
+            --since|--within)
+                (( $# >= 2 )) || die "$1 needs a timeframe: today, yesterday, week, month, 3d, 2w ..."
+                since_spec=$2
+                [[ -n "$since_spec" ]] || die "$1 needs a timeframe: today, yesterday, week, month, 3d, 2w ..."
+                shift ;;
+            --since=*|--within=*)    since_spec=${1#*=} ;;
             -*)            die "unknown option: $1" ;;
             # A positional is a root if it is written like a path — it contains a
             # slash, or it is `.` / `..` — and a search term otherwise. Deciding by
@@ -2090,14 +2338,27 @@ cmd_repos() {
             # you. Typing a name at a tool whose whole job is jumping to repos by
             # name means the name; `./x` is how you say you meant the directory.
             */*|.|..)      root=$1 ;;
-            *)             list_filter=${1,,} ;;
+            *)             list_filter=$(fold_needle "$1") ;;
         esac
         shift
     done
     set_window "$want_window"
+    if [[ -n "$since_spec" ]]; then
+        parse_since "$since_spec" \
+            || die "not a timeframe: $since_spec (today, yesterday, week, month, 3d, 2w, 1m)"
+    fi
     [[ -n "$root" ]] || root=$(default_root)
     root=$(resolve "$root") || die "no such directory: $root"
     [[ -d "$root" ]] || die "not a directory: $root"
+
+    lr_pretty=${LSRECENT_PRETTY_NAMES:-1}
+    [[ "$lr_pretty" == 0 || "$lr_pretty" == 1 ]] || die "LSRECENT_PRETTY_NAMES must be 0 or 1: $lr_pretty"
+    # Focus only the plain listing. Anything that already narrowed it — a search,
+    # a timeframe, --today, --all — has said what it wants to see.
+    focus_min=${LSRECENT_FOCUS_TODAY:-10}
+    [[ "$focus_min" =~ ^[0-9]+$ ]] || die "LSRECENT_FOCUS_TODAY must be a number: $focus_min"
+    focus_min=$(( 10#$focus_min ))
+    if (( lr_no_limit || since_lo )) || [[ -n "$window$list_filter" ]]; then focus_min=0; fi
 
     load_visits
     collect_repos "$root" || die "no git repositories under $root"
@@ -2114,6 +2375,10 @@ cmd_repos() {
     if [[ -n "$list_filter" ]]; then
         printf "${C_HINT}no repository matches ${C_NOW}\"%s\"${C_HINT} under %s${C_OFF}\n" \
             "$list_filter" "$root"
+        return 1
+    fi
+    if (( since_lo )); then
+        printf "${C_HINT}No repos touched %s under %s${C_OFF}\n" "$since_label" "$root"
         return 1
     fi
     if [[ -n "$window" ]]; then

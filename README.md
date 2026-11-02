@@ -87,6 +87,7 @@ lsrepos -A            # busiest-first within each bucket
 lsrepos -n            # alphabetical within each bucket, not most-recent-first
 
 lsrepos wms           # only the repos matching "wms", still grouped by recency
+lsrepos --since 3d x  # only repos touched in the last 3 days, matching "x"
 lsr wms               # the same, by the shortest route
 lstoday claude        # today's work, narrowed
 
@@ -311,7 +312,9 @@ what it had just numbered. It accepts more than a number:
 | --- | --- |
 | `23` | cd into entry 23 — **numbers are the ranking, not the page** |
 | `text` | search labels and paths for `text`, case-insensitive, best match first |
-| `/` | clear the search, back to the full ranking |
+| `/` | clear the search and any timeframe, back to the full ranking |
+| `@today text` | search only what was touched in a timeframe — `@today`, `@yesterday`, `@week`, `@month`, `@3d`, `@2w`; the text is optional |
+| `@` | drop the timeframe, keep the search |
 | `n` or `+` | next page |
 | `p` or `-` | previous page |
 | `t` | back to the top of the current view |
@@ -320,7 +323,7 @@ what it had just numbered. It accepts more than a number:
 | `sr` / `sf` / `sv` / `sn` | go straight to that order — recency, frecency, visits, name |
 | `ss` | **keep** the order in force — every listing starts in it from now on |
 | `?` | the same summary |
-| enter, `q`, ctrl-d | stay put — except that enter takes the **only match** of a search |
+| enter, `q`, ctrl-d | stay put — except that enter takes the **only match** of a search, and on a [busy day](#busy-days-today-only) shows more of today |
 
 Every key the tool offers — here, on the prompt line, in the paging footer — is
 printed in its **own colour**, distinct from the prose describing it, and the
@@ -532,6 +535,74 @@ prints in full, because it delegates its layout to `ls -C`, which packs
 column-major — cutting rows off the bottom there would drop a scattered subset
 rather than the oldest entries.
 
+## Busy days: today only
+
+On a day you have been in forty repositories, the question a listing answers is
+"which of today's", and YESTERDAY onwards is a screen of answers to a different
+question pushing it out of view. So when TODAY holds at least `focus_today` repos
+(default **10**), the plain listing shows today and nothing else:
+
+```
+━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  1 lsrecent                      2 Personal Blog Manager Plugin
+ …
+ 31 eval                         32 Daniel WhatsApp Plugin
+… a busy day, so today only: 1-32 of 49 · enter for more of today · 669 older after them · lsrepos --all for everything
+→ number · text to search · n/p pages · s sort (recency) · ? help · enter more of today · q stays:
+ 33 Claude Visual Communications Plugin   34 Claude Digital Printing Plugin
+ …
+… 33-49 of 49 today · that is all of today · n goes on to older ones · p for the page before
+→ number · text to search · n/p pages · s sort (recency) · ? help · enter stays:
+```
+
+**Enter means "more of today" while there is more of today**, and the prompt line
+says so (`enter more of today · q stays`). Once today is used up, enter goes back
+to staying put. `q` and ctrl-d always stay put.
+
+Nothing is renumbered. The older repos are numbered after today's as always, so
+`n` pages on into them, a number past today still cds, and `lsrepos --all`
+prints the full grouped listing. Focus applies only to the plain listing: a
+search, a timeframe, `--today`/`--yesterday` or `--all` has already said what it
+wants to see. `lsrecent config set focus_today 0` turns it off; any other number
+moves the threshold.
+
+## Timeframes
+
+`--since` (or `--within`) keeps only the repos touched in the last stretch of
+calendar days, today included, and combines with a search. So does `@` at the
+prompt:
+
+```bash
+lsrepos --since today claude    # today's repos matching "claude"
+lsrepos --since 3d              # TODAY, YESTERDAY and 2 DAYS AGO
+lsr --since 2w wms              # the last fourteen days, matching "wms"
+```
+
+```
+→ … : @today claude             # at the prompt: today's matching "claude"
+→ … : @3d                       # just the last three days
+→ … : @                         # drop the timeframe, keep the search
+```
+
+Accepted: `today` (`t`), `yesterday` (`y`, meaning yesterday and today), `week`
+(7 days), `month` (30), `N` or `Nd`, `Nw`, `Nm`. Calendar days rather than hours,
+because the buckets are calendar days: `@2d` means TODAY and YESTERDAY, not "since
+this time on Saturday".
+
+It is not the same as `lstoday`. `lstoday` reads the visit log alone, so it
+lists what you `cd`'d into; `--since today` cuts over the listing's own dates,
+the newer of visit and filesystem, so it keeps exactly what sits under the TODAY
+header, including a repo you only edited from another directory.
+
+## Names with spaces
+
+Repository names print with hyphens and underscores as spaces, so
+`Wheres-My-Stuff-Deployment` reads as `Wheres My Stuff Deployment`. Display
+only: the entry still points at the real directory. Search treats hyphen,
+underscore and space as the same character, so `wheres my`, `wheres-my` and
+`wheres_my` all find it, highlighted the same way. `lsrecent config set
+pretty_names 0` prints the directory names as they are.
+
 ## Getting a plain listing anyway
 
 `lsreg` is the escape hatch — plain `ls` with normal colors, taking the same
@@ -684,6 +755,8 @@ lsrecent config path
 | `noise_pct` | `LSRECENT_NOISE_PCT` | 0–100 | `50` |
 | `repo_root` | `LSRECENT_REPO_ROOT` | a path | `~/repos/github`, else `~/repos` |
 | `repo_depth` | `LSRECENT_REPO_DEPTH` | a number | `4` |
+| `focus_today` | `LSRECENT_FOCUS_TODAY` | a number, `0` to never focus | `10` |
+| `pretty_names` | `LSRECENT_PRETTY_NAMES` | `0`, `1` | `1` |
 
 **A flag beats the environment, the environment beats the file, the file beats the
 default.** So an export is still how you say "just this shell" and the file is how
