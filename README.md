@@ -120,11 +120,12 @@ lstoday claude
 lsr ./wms             # ...and this still means the directory
 ```
 
-The set is reduced **before** bucketing, so what prints is an ordinary grouped
-listing that happens to contain only matches — numbered from 1, under the same
-headers, answered by the same prompt, with the matched characters highlighted.
+The set is reduced **before** bucketing, so the matches are numbered from 1.
 Filtering at the prompt instead would mean numbering 315 repositories in order to
-show four of them.
+show four of them. On a terminal, with the prompt to answer, the matches print as
+the [cursor list](#search-results-newest-first-with-a-cursor): newest first, the
+first one already selected, enter to go. Piped or redirected, they print as an
+ordinary grouped listing under the usual headers.
 
 **A search matching exactly one repository does not ask.** It prints the match and
 cds there:
@@ -311,7 +312,8 @@ what it had just numbered. It accepts more than a number:
 | Reply | Does |
 | --- | --- |
 | `23` | cd into entry 23 — **numbers are the ranking, not the page** |
-| `text` | search labels and paths for `text`, case-insensitive, best match first |
+| `text` | search labels and paths for `text`, case-insensitive, **newest first**, as a [cursor list](#search-results-newest-first-with-a-cursor) |
+| ↑ ↓ (ctrl-p ctrl-n) | in a search: move the cursor; enter opens the row under it, Esc stays put |
 | `/` | clear the search and any timeframe, back to the full ranking |
 | `@today text` | search only what was touched in a timeframe — `@today`, `@yesterday`, `@week`, `@month`, `@3d`, `@2w`; the text is optional |
 | `@` | drop the timeframe, keep the search |
@@ -324,7 +326,7 @@ what it had just numbered. It accepts more than a number:
 | `ss` | **keep** the order in force — every listing starts in it from now on |
 | `c` or `/config` | the [settings menu](#the-settings-menu); the listing redraws with what you chose |
 | `?` | the same summary |
-| enter, `q`, ctrl-d | stay put — except that enter takes the **only match** of a search, and on a [busy day](#busy-days-today-only) shows more of today |
+| enter, `q`, ctrl-d | stay put — except that in a search enter opens the row under the cursor, and on a [busy day](#busy-days-today-only) shows more of today |
 
 Every key the tool offers — here, on the prompt line, in the paging footer — is
 printed in its **own colour**, distinct from the prose describing it, and the
@@ -343,25 +345,57 @@ $ ls
  …
 … 238 more, numbered 21-258 · n pages to them, lsrepos --all prints them
 → number · text to search · n/p pages · s sort (recency) · ? help · enter stays: noisy
- 79 noisycity-api-blueprint
-… the only match · enter goes there · / clears the search
-→ number · text to search · n/p pages · s sort (recency) · ? help · enter stays:
+━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▶  79 noisycity-api-blueprint  ● today 09:12   ~/repos/github/smart-home/noisycity-api-blueprint
+… 1-1 of 1 matching "noisy"
+→ ↑↓ move · enter opens ▶ · number, or text to search again · / clears · ? help · esc stays:
 /home/you/repos/github/smart-home/noisycity-api-blueprint
 ```
 
-**Results are ranked, and the match is lit up.** Four tiers, best first: the whole
-name, then names starting with what you typed, then names containing it, then
-entries whose *path* matched but whose name did not. Inside a tier the listing's
-own order survives, so the best answer is at the top and the rest are still
-newest-first underneath it. The characters that matched are highlighted inside the
-name — and a row with no highlight is telling you it is here on its path, not its
-name. Typing `wms` and finding `Wheres-My-Stuff` fourth, under three repos whose
-paths happen to contain those letters, is a search failing while appearing to
-work.
+### Search results: newest first, with a cursor
 
-**One match left standing, and enter takes it.** Otherwise enter still means stay
-put, and `q` and ctrl-d always do — the offer is only ever made on the footer line
-that says so.
+A search (at the prompt, or `lsrepos laptop` on the command line) prints one result
+per row, **newest first**, with when each was last touched. Today's results sit
+under a green `TODAY` bar with their time lit up, older ones under `EARLIER`, and
+the cursor `▶` is already on the first result:
+
+```
+━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+▶  1 laptop claude               ● today 14:40   ~/repos/github/ai-agents-and-prompts/…
+   2 Laptop System Mgmt          ● today 14:03   ~/repos/github/linux-desktop/Laptop-…
+   3 Laptop Search 1126          ● today 13:49   ~/repos/github/logistics-procurement/…
+━━ EARLIER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   4 OpenCode Laptop Config 1126 Thu 12:53         ~/repos/github/OpenCode-Laptop-Config-1126
+… 1-4 of 4 matching "laptop"
+→ ↑↓ move · enter opens ▶ · number, or text to search again · / clears · ? help · esc stays:
+```
+
+- **enter** opens the row under the cursor; with nothing moved that is the newest match.
+- **↑ / ↓** (or ctrl-p / ctrl-n) move the cursor. Inside the page it redraws in
+  place, so arrowing through ten rows leaves one copy in the scrollback. Past the
+  last row it prints the next page below, cursor on its first row; past the first,
+  the page before.
+- **Esc** or ctrl-d stays put. **Any other key** starts an ordinary prompt line,
+  already holding that key, so a number, a new search, `n`, `p`, `s` or `c` all
+  work as before (`q` then enter also stays).
+
+Newest first is the default because the repo you had open an hour ago is far more
+often the one you are looking for than the one whose name happens to match best.
+The date is the one the listing buckets by: the newer of the last visit and the
+last filesystem change (the visit log alone under `lstoday` / `lsyesterday`).
+
+`search_order = match` brings back ranking by how well the name matches. Four tiers,
+best first: the whole name, then names starting with what you typed, then names
+containing it, then entries whose *path* matched but whose name did not. Inside a
+tier the listing's own order survives. In that order today's results are not one
+block, so there are no bars, but their `● today` time is still lit up.
+
+Either way, the characters that matched are highlighted inside the name, and a row
+with no highlight is telling you it is here on its path, not its name.
+
+The rows are cut to the terminal width (the path gives way first, from the left)
+so the redraw knows exactly how many rows to go back up. A page too tall for the
+screen (`a`, everything unpaged) is reprinted below instead of redrawn.
 
 `79` was never on screen. The search matches the path as well as the label, so a
 topic name (`smart-home`) collects everything filed under it even though the topic
@@ -753,10 +787,11 @@ settings · saved to ~/.config/lsrecent/config
    …
    7 focus_today   10                         default  repos opened today that make the listing show only today
    8 pretty_names  1                          default  show repo-names-like-this as repo names like this
+   9 search_order  newest                     default  order of search results
 → number to change · d number resets it (d3) · e edit the file · enter done:
 ```
 
-Type a setting's number. An on/off setting flips. `sort` offers its four orders
+Type a setting's number. An on/off setting flips, and so does `search_order`. `sort` offers its four orders
 by number. Anything else asks for a value, which is checked before it is saved.
 `d3` puts setting 3 back to its default, `e` opens the file in `$EDITOR`, and
 enter leaves. Every change is written to the file straight away. Opened from a
@@ -790,6 +825,7 @@ lsrecent config path
 | `repo_depth` | `LSRECENT_REPO_DEPTH` | a number | `4` |
 | `focus_today` | `LSRECENT_FOCUS_TODAY` | a number, `0` to never focus | `10` |
 | `pretty_names` | `LSRECENT_PRETTY_NAMES` | `0`, `1` | `1` |
+| `search_order` | `LSRECENT_SEARCH_ORDER` | `newest`, `match` | `newest` |
 
 **A flag beats the environment, the environment beats the file, the file beats the
 default.** So an export is still how you say "just this shell" and the file is how

@@ -1,3 +1,19 @@
+lsrecent (1.17.0) unstable; urgency=low
+
+  * Search results are newest first, one per row, each with when it was last
+    touched. Today's sit under a TODAY bar with their time lit up in green,
+    older ones under EARLIER.
+  * A cursor (▶) starts on the first result: enter opens it, up/down or
+    ctrl-p/ctrl-n move it (redrawn in place, paging past either end), Esc or
+    ctrl-d stays put, any other key starts an ordinary prompt line holding it.
+  * `lsrepos laptop` on a terminal opens straight into that list. Piped, it is
+    the grouped listing as before.
+  * New setting `search_order`: newest (default) or match, the old ranking by
+    whole name, starts-with, contains, then path. Any two-valued setting now
+    toggles in the settings menu.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Mon, 02 Nov 2026 16:00:00 +0200
+
 lsrecent (1.16.0) unstable; urgency=low
 
   * A settings menu: `lsrecent config` on a terminal, or `c` / `/config` at any

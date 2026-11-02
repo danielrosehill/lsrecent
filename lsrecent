@@ -97,9 +97,14 @@
 # can reach from it:
 #   23        cd into entry 23 — numbers are the ranking, not the page
 #   text      search labels and paths, case-insensitive; a bare word is a search.
-#             Results are ranked — whole name, then starts-with, then contains,
-#             then path-only — and the matched characters are highlighted inside
-#             the name. One match left standing: enter goes there.
+#             Results come one per row, newest first, each with when it was last
+#             touched; today's sit under a TODAY bar and their time is lit up. A
+#             cursor (▶) starts on the first result: enter goes there, up/down
+#             (or ctrl-p/ctrl-n) move it, typing anything else starts a new line
+#             at the prompt. search_order = match ranks whole name, then
+#             starts-with, then contains, then path-only instead. The matched
+#             characters are highlighted inside the name. `lsrepos laptop` on a
+#             terminal opens straight into the same list.
 #   /         clear the search and any timeframe, back to the full ranking
 #   @3d text  search only what was touched in a timeframe (@today, @yesterday,
 #             @week, @month, @3d, @2w); @ alone drops the timeframe
@@ -157,7 +162,7 @@
 #   lsrecent config edit     The file in $EDITOR
 #   lsrecent config path     Where the file is
 # The settings, each also an LSRECENT_* variable (LSRECENT_FOCUS_TODAY,
-# LSRECENT_PRETTY_NAMES for the last two):
+# LSRECENT_PRETTY_NAMES, LSRECENT_SEARCH_ORDER for the last three):
 #   sort        recency, frecency, visits or name
 #   prompt      1 to end a listing with the browser prompt, 0 for listing only
 #   max_rows    rows one listing may occupy, 0 for unlimited
@@ -166,6 +171,8 @@
 #   repo_depth  how deep under the root to look for them
 #   focus_today repos opened today that make the listing show only today, 0 = never
 #   pretty_names 1 to show repo-names-like-this as repo names like this
+#   search_order newest (default) puts the most recently touched match first;
+#               match ranks whole name, then starts-with, then contains, then path
 # A flag beats the environment, the environment beats the file, and the file beats
 # the default — so an export is still how you say "just this shell", and the file
 # is how you say "always". A setting written while the matching variable is
@@ -194,7 +201,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.16.0"
+VERSION="1.17.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -245,6 +252,8 @@ else
     C_MATCH=$'\e[1;30;43m'
 fi
 C_OFF=$'\e[0m'
+# Today's results in a search list: the one row the eye should land on first.
+C_TODAY=$'\e[1;92m'
 
 # Compact the visit log once it grows past this many lines.
 PRUNE_THRESHOLD=5000
@@ -514,11 +523,12 @@ declare -A settings_var=(
     [repo_depth]=LSRECENT_REPO_DEPTH
     [focus_today]=LSRECENT_FOCUS_TODAY
     [pretty_names]=LSRECENT_PRETTY_NAMES
+    [search_order]=LSRECENT_SEARCH_ORDER
 )
 # Printed in this order. Bash hands back the keys of an associative array in its
 # own hash order, which is neither the order they were written in nor stable
 # between values, and a settings listing that reshuffles itself is unreadable.
-settings_keys=( sort prompt max_rows noise_pct repo_root repo_depth focus_today pretty_names )
+settings_keys=( sort prompt max_rows noise_pct repo_root repo_depth focus_today pretty_names search_order )
 
 setting_desc() {
     case $1 in
@@ -530,6 +540,7 @@ setting_desc() {
         repo_depth) echo "how deep under the root to look for them" ;;
         focus_today)  echo "repos opened today that make the listing show only today" ;;
         pretty_names) echo "show repo-names-like-this as repo names like this" ;;
+        search_order) echo "order of search results" ;;
     esac
 }
 
@@ -546,6 +557,7 @@ setting_values() {
         repo_depth) echo "a number" ;;
         focus_today)  echo "a number, 0 to never focus" ;;
         pretty_names) echo "0 or 1" ;;
+        search_order) echo "newest or match" ;;
     esac
 }
 
@@ -562,6 +574,7 @@ setting_default() {
         repo_depth) echo "4" ;;
         focus_today)  echo "10" ;;
         pretty_names) echo "1" ;;
+        search_order) echo "newest" ;;
     esac
 }
 
@@ -580,6 +593,7 @@ setting_check() {
         max_rows|repo_depth|focus_today) [[ "$val" =~ ^[0-9]+$ ]] || return 1 ;;
         noise_pct)  [[ "$val" =~ ^[0-9]+$ ]] && (( 10#$val <= 100 )) || return 1 ;;
         repo_root)  [[ -n "$val" ]] || return 1 ;;
+        search_order) [[ "$val" == newest || "$val" == match ]] || return 1 ;;
     esac
     return 0
 }
@@ -764,6 +778,7 @@ setting_choices() {
     case $1 in
         sort)                 echo "recency frecency visits name" ;;
         prompt|pretty_names)  echo "0 1" ;;
+        search_order)         echo "newest match" ;;
     esac
 }
 
@@ -847,10 +862,10 @@ setting_edit() {
     local key=$1 cur val reply i
     cur=$(setting_value "$key")
     local -a ch=( $(setting_choices "$key") )
-    if [[ "${ch[*]}" == "0 1" ]]; then
+    if (( ${#ch[@]} == 2 )); then
         # Two values: choosing it is the change. Asking "which of the two?"
         # after you have already said "this one" is a question with one answer.
-        [[ "$cur" == 1 ]] && val=0 || val=1
+        [[ "$cur" == "${ch[1]}" ]] && val=${ch[0]} || val=${ch[1]}
     else
         printf "  ${C_HINT}%s ${C_DIM}— %s${C_OFF}\n" "$(setting_desc "$key")" "$(setting_values "$key")" > /dev/tty
         if (( ${#ch[@]} )); then
@@ -1440,6 +1455,14 @@ stale_integration_notice() {
 # stands in for the prompt rather than a question nothing could honour: that
 # covers both a stale shell and `lsrecent repos` run straight from argv, where
 # typing a number would not work either.
+# Whether prompt_jump will actually ask, rather than print the notice or nothing.
+will_prompt() {
+    (( stdout_tty )) || return 1
+    [[ "${LSRECENT_PROMPT:-1}" != 0 ]] || return 1
+    [[ -n "${LSRECENT_CD_FILE:-}" ]] || return 1
+    [[ -r /dev/tty && -w /dev/tty ]]
+}
+
 prompt_jump() {
     local dest=${LSRECENT_CD_FILE:-}
     (( stdout_tty )) || return 0
@@ -1528,9 +1551,44 @@ fold_needle() {
 # newer of visit and filesystem otherwise — so `@today` at the prompt keeps
 # exactly what is under the TODAY header above it, no more and no fewer.
 entry_since() {
-    local p=${sel_paths[$1]} ts
-    if [[ -n "$window" ]]; then ts=${opened_ts[$p]:-0}; else ts=${repo_ts[$p]:-0}; fi
-    (( ts >= view_since ))
+    entry_ts "$1"
+    (( ets >= view_since ))
+}
+
+# The date ranking entry $1 is listed by, into `ets` (no fork: once per entry).
+ets=0
+entry_ts() {
+    local p=${sel_paths[$1]}
+    if [[ -n "$window" ]]; then ets=${opened_ts[$p]:-0}; else ets=${repo_ts[$p]:-0}; fi
+}
+
+# Whether the view is an answer to a question — a search at the prompt, one given
+# on the command line, or a timeframe — rather than the listing itself. A narrowed
+# view prints as the cursor list (render_list_page) and enter takes the cursor.
+view_narrowed() {
+    [[ -n "$view_filter$view_since_label$list_filter" ]]
+}
+
+# The cursor: a position in `view` (not an entry number), -1 for none. Put on the
+# first result whenever a narrowed view is built, so a search followed by enter
+# goes to the top result without anything being typed back.
+cursor=-1
+# Whether the view runs newest-first, so that today's results are one block at
+# the top and can sit under a TODAY bar. False only under search_order = match.
+view_chrono=1
+
+# Newest first, by the date the entry is listed under; ties keep listing order.
+# One sort over the matches rather than a comparison sort in bash: a search is
+# typed by hand, so one fork per search costs nothing anyone can see.
+sort_view_newest() {
+    (( ${#view[@]} > 1 )) || return 0
+    local i
+    local -a keyed=()
+    for i in "${view[@]}"; do
+        entry_ts "$i"
+        keyed+=( "$ets"$'\t'"$i" )
+    done
+    mapfile -t view < <(printf '%s\n' "${keyed[@]}" | sort -t$'\t' -k1,1nr -k2,2n | cut -f2)
 }
 
 # The view, ranked when there is a search and in listing order when there is not.
@@ -1564,6 +1622,19 @@ build_view() {
         done
         view=( "${tier1[@]}" "${tier2[@]}" "${tier3[@]}" "${tier4[@]}" )
     fi
+    # Newest first is the default for a search: the repo you were in an hour ago
+    # is the one you are looking for far more often than the one whose name
+    # happens to match best. search_order = match keeps the tiers above.
+    view_chrono=1
+    if [[ -n "$needle$list_filter" ]]; then
+        if [[ "${lr_search_order:-newest}" == match ]]; then
+            [[ -n "$needle" ]] && view_chrono=0
+        else
+            sort_view_newest
+        fi
+    fi
+    cursor=-1
+    view_narrowed && (( ${#view[@]} )) && cursor=0
     view_from=0
     page_start=0
     plan_view_layout
@@ -1601,6 +1672,13 @@ plan_view_layout() {
     budget=$(row_budget)
     vp_page=0
     (( budget > 0 )) && vp_page=$(( budget * vp_per ))
+    # The cursor list is one entry per row, and spends two rows of the budget on
+    # its TODAY / EARLIER bars.
+    if view_narrowed; then
+        vp_per=1
+        vp_page=0
+        (( budget > 0 )) && vp_page=$(( budget > 4 ? budget - 2 : 2 ))
+    fi
     return 0
 }
 
@@ -1615,18 +1693,18 @@ plan_view_layout() {
 # A path-only match has nothing to light up in the label, so it prints plain: the
 # absence of a highlight is itself the signal that the name did not match.
 print_label() {
-    local label=$1 needle=$2 width=$3 low=${1,,} pre
+    local label=$1 needle=$2 width=$3 low=${1,,} pre base=${4:-$'\e[01;34m'}
     low=${low//[-_]/ }
     needle=${needle//[-_]/ }
     if [[ -z "$needle" || "$low" != *"$needle"* ]]; then
-        printf '\e[01;34m%-*s\e[0m' "$width" "$label"
+        printf '%s%s\e[0m%*s' "$base" "$label" "$(( width - ${#label} ))" ''
         return 0
     fi
     pre=${low%%"$needle"*}
-    printf '\e[01;34m%s\e[0m%s%s\e[0m\e[01;34m%s\e[0m%*s' \
-        "${label:0:${#pre}}" \
+    printf '%s%s\e[0m%s%s\e[0m%s%s\e[0m%*s' \
+        "$base" "${label:0:${#pre}}" \
         "$C_MATCH" "${label:${#pre}:${#needle}}" \
-        "${label:$(( ${#pre} + ${#needle} ))}" \
+        "$base" "${label:$(( ${#pre} + ${#needle} ))}" \
         "$(( width - ${#label} ))" ''
 }
 
@@ -1643,6 +1721,11 @@ render_page() {
             printf "${C_HINT}nothing touched ${C_NOW}%s${C_DIM} — ${C_KEY}@${C_HINT} on its own clears the timeframe${C_OFF}\n" \
                 "$view_since_label" > /dev/tty
         fi
+        return 0
+    fi
+
+    if view_narrowed; then
+        render_list_page "$unlimited"
         return 0
     fi
 
@@ -1701,6 +1784,238 @@ render_page() {
         "$first" "$last" "$total" "$scope" "$nav" > /dev/tty
 }
 
+# --- the cursor list ----------------------------------------------------------
+#
+# A narrowed view — a search, a timeframe — prints one result per row instead of
+# packed columns: a cursor needs somewhere unambiguous to be, and "down" has to
+# mean the next result. Each row carries when it was last touched, because "the
+# one I had open this morning" is how most searches are actually meant, and
+# today's results sit under a TODAY bar with their time lit up in green.
+#
+#   ━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   ▶ 4  Laptop Search      ● today 11:26      ~/repos/github/tools/Laptop-Search
+#     9  Laptop Setup       ● today 09:02      ~/repos/github/linux/Laptop-Setup
+#   ━━ EARLIER ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#    31  Old Laptop Notes   Oct 28             ~/repos/github/notes/Old-Laptop-Notes
+#
+# Moving the cursor redraws the page in place (cursor-up, reprint) rather than
+# printing it again, so arrowing through ten results leaves one copy in the
+# scrollback, not ten. Every row is cut to the terminal width so that the number
+# of rows to go back up is known exactly; a page that would not fit on the screen
+# (`a`, everything unpaged) is reprinted below instead.
+
+# A label for when an entry was last touched, into `when`; `when_today` = 1 for
+# today. printf's %(...)T is a builtin, so this costs no fork per row.
+when='' when_today=0
+when_label() {
+    local ts=$1 y_ts y_now
+    when_today=0
+    if (( ts == 0 )); then
+        when='undated'
+    elif (( ts >= day_mid[0] )); then
+        printf -v when '● today %(%H:%M)T' "$ts"; when_today=1
+    elif (( ts >= day_mid[1] )); then
+        printf -v when 'yesterday %(%H:%M)T' "$ts"
+    elif (( ts >= day_mid[6] )); then
+        printf -v when '%(%a %H:%M)T' "$ts"
+    else
+        printf -v y_ts '%(%Y)T' "$ts"; printf -v y_now '%(%Y)T' -1
+        if [[ "$y_ts" == "$y_now" ]]; then printf -v when '%(%b %e)T' "$ts"
+        else printf -v when '%(%Y-%m-%d)T' "$ts"
+        fi
+    fi
+}
+
+# Terminal rows, for deciding whether a page can be redrawn in place.
+term_rows() {
+    local rows=${LINES:-}
+    if [[ -z "$rows" ]]; then
+        rows=$( { stty size < /dev/tty; } 2>/dev/null )
+        rows=${rows%% *}
+    fi
+    [[ "$rows" =~ ^[0-9]+$ ]] || rows=24
+    echo "$rows"
+}
+
+# Screen rows a line of hint text takes at width $2, into `vis_rows`. Only for
+# lines built from the C_* colours, whose escapes all end in `m`.
+vis_rows=1
+count_vis_rows() {
+    local s=$1 cols=$2 out=''
+    while [[ "$s" == *$'\e['* ]]; do
+        out+=${s%%$'\e['*}
+        s=${s#*$'\e['}
+        s=${s#*m}
+    done
+    out+=$s
+    vis_rows=$(( (${#out} + cols - 1) / cols ))
+    (( vis_rows < 1 )) && vis_rows=1
+    return 0
+}
+
+# Rows the last drawn list block took (bars, entries, footer), for the redraw.
+lb_rows=0
+
+# Print a page of the cursor list from view_from and advance it. With $1 set,
+# the whole view regardless of the row budget.
+render_list_page() {
+    local unlimited=${1:-} total=${#view[@]}
+    local cap=$(( total - view_from ))
+    [[ -n "$unlimited" ]] || (( vp_page == 0 || vp_page >= cap )) || cap=$vp_page
+    page_start=$view_from
+    view_from=$(( page_start + cap ))
+    (( cursor >= page_start && cursor < view_from )) || cursor=$page_start
+    draw_list_block
+}
+
+# The rows from page_start to view_from, and the footer under them.
+draw_list_block() {
+    local total=${#view[@]} cols needle=${view_filter,,}
+    cols=$(term_cols)
+    (( cols > 20 )) || cols=20
+    # Fixed cells: cursor mark (2), number, a space, the label, a space, the date
+    # (17), a space. The label gives way before the date does, and the path takes
+    # whatever is left, or is dropped when that is too little to be worth reading.
+    local whenw=17 lw=$(( vp_namew - 2 ))
+    local fixed=$(( 2 + vp_numw + 1 + 1 + whenw + 1 ))
+    (( lw > cols - fixed - 1 )) && lw=$(( cols - fixed - 1 ))
+    (( lw < 8 )) && lw=8
+    local pathw=$(( cols - 1 - fixed - lw ))
+
+    local any_today=0 k n label path base mark prev=-1 home=$HOME
+    if (( view_chrono && total )); then
+        entry_ts "${view[0]}"; when_label "$ets"; any_today=$when_today
+    fi
+    lb_rows=0
+    for (( k = page_start; k < view_from; k++ )); do
+        n=${view[k]}
+        entry_ts "$n"; when_label "$ets"
+        if (( view_chrono && any_today && when_today != prev )); then
+            if (( when_today )); then
+                print_header 92 "TODAY" "$cols" > /dev/tty
+            else
+                print_header 90 "EARLIER" "$cols" > /dev/tty
+            fi
+            (( lb_rows++ ))
+        fi
+        prev=$when_today
+
+        label=${sel_names[n]}
+        local ln=$needle
+        if (( ${#label} > lw )); then label="${label:0:lw-1}…"; ln=''; fi
+        mark='  '; base=$'\e[01;34m'
+        if (( k == cursor )); then mark="${C_KEY}▶${C_OFF} "; base=$'\e[01;7;34m'; fi
+
+        printf '%s\e[90m%*d\e[0m ' "$mark" "$vp_numw" "$n" > /dev/tty
+        print_label "$label" "$ln" "$lw" "$base" > /dev/tty
+        if (( when_today )); then
+            printf " ${C_TODAY}%-*s${C_OFF} " "$whenw" "$when" > /dev/tty
+        else
+            printf " ${C_DIM}%-*s${C_OFF} " "$whenw" "$when" > /dev/tty
+        fi
+        path=${sel_paths[n]}
+        [[ "$path" == "$home"/* ]] && path="~${path#"$home"}"
+        if (( pathw >= 12 )); then
+            (( ${#path} > pathw )) && path="…${path: -$(( pathw - 1 ))}"
+            printf '\e[90m%s\e[0m' "$path" > /dev/tty
+        fi
+        printf '\e[K\n' > /dev/tty
+        (( lb_rows++ ))
+    done
+
+    local first=$(( page_start + 1 )) last=$view_from scope='' nav=''
+    [[ -n "$view_filter" ]] && scope="${C_HINT} matching ${C_NOW}\"$view_filter\""
+    [[ -n "$list_filter" && -z "$view_filter" ]] && scope="${C_HINT} matching ${C_NOW}\"$list_filter\""
+    [[ -n "$view_since_label" ]] && scope+="${C_HINT} touched ${C_NOW}$view_since_label"
+    if (( view_from < total )); then
+        printf -v nav "${C_DIM} · ${C_KEY}n${C_HINT} next %d" \
+            "$(( total - view_from < vp_page || vp_page == 0 ? total - view_from : vp_page ))"
+    fi
+    (( page_start > 0 )) && nav+="${C_DIM} · ${C_KEY}p${C_HINT} back"
+    local foot
+    printf -v foot "${C_DIM}… ${C_NOW}%d-%d${C_HINT} of ${C_NOW}%d%s%s${C_OFF}" \
+        "$first" "$last" "$total" "$scope" "$nav"
+    printf '%s\e[K\n' "$foot" > /dev/tty
+    count_vis_rows "$foot" "$cols"
+    lb_rows=$(( lb_rows + vis_rows ))
+}
+
+# The prompt under a cursor list. Its row count is kept for the redraw.
+lp_prompt_rows=1
+list_prompt() {
+    local p
+    printf -v p "${C_DIM}→ ${C_KEY}↑↓${C_HINT} move ${C_DIM}· ${C_KEY}enter${C_HINT} opens ${C_KEY}▶${C_DIM} · ${C_HINT}number, or text to search again ${C_DIM}· ${C_KEY}/${C_HINT} clears ${C_DIM}· ${C_KEY}?${C_HINT} help ${C_DIM}· ${C_KEY}esc${C_HINT} stays${C_DIM}: ${C_OFF}"
+    printf '%s\e[K' "$p" > /dev/tty
+    count_vis_rows "$p" "$(term_cols)"
+    lp_prompt_rows=$vis_rows
+}
+
+# Move the cursor by $1 within the view. Inside the page: redraw it in place.
+# Off either end of the page: print the next or previous page below, the cursor
+# on its nearest row, the way n and p would.
+list_move() {
+    local to=$(( cursor + $1 )) total=${#view[@]}
+    (( to >= 0 && to < total )) || return 0
+    if (( to >= page_start && to < view_from )); then
+        cursor=$to
+        if (( lb_rows + lp_prompt_rows <= $(term_rows) )); then
+            printf '\r\e[%dA' "$(( lb_rows + lp_prompt_rows - 1 ))" > /dev/tty
+        else
+            printf '\r\e[K' > /dev/tty
+        fi
+        draw_list_block
+        return 0
+    fi
+    printf '\r\e[K' > /dev/tty
+    if (( to >= view_from )); then
+        cursor=$to
+        render_list_page
+    else
+        local back=$vp_page
+        (( back > 0 )) || back=$page_start
+        view_from=$(( page_start - back ))
+        (( view_from < 0 )) && view_from=0
+        render_list_page
+        cursor=$to
+        printf '\r\e[%dA' "$(( lb_rows ))" > /dev/tty
+        draw_list_block
+    fi
+}
+
+# Read one answer at a cursor list into `reply`, in the same language as the
+# line prompt: enter becomes the number under the cursor, ctrl-d and Esc become
+# q, and any other key starts an ordinary line — prefilled with that key — so a
+# number, a new search, n, s or c all still work.
+read_list_reply() {
+    local c seq
+    while :; do
+        list_prompt
+        IFS= read -rsn1 c < /dev/tty || { printf '\n' > /dev/tty; reply=q; return 0; }
+        case "$c" in
+            '')
+                printf '\n' > /dev/tty; reply=${view[cursor]}; return 0 ;;
+            $'\e')
+                seq=''
+                IFS= read -rsn2 -t 0.05 seq < /dev/tty
+                case "$seq" in
+                    '[A'|'OA') list_move -1 ;;
+                    '[B'|'OB') list_move 1 ;;
+                    '') printf '\n' > /dev/tty; reply=q; return 0 ;;
+                    *)  # Another sequence (PgUp, F-keys): swallow its tail.
+                        IFS= read -rsn8 -t 0.02 seq < /dev/tty ;;
+                esac ;;
+            $'\x10') list_move -1 ;;   # ctrl-p
+            $'\x0e') list_move 1 ;;    # ctrl-n
+            $'\x04') printf '\n' > /dev/tty; reply=q; return 0 ;;
+            $'\x7f'|$'\b'|$'\t') ;;
+            *)
+                IFS= read -e -r -i "$c" reply < /dev/tty || { printf '\n' > /dev/tty; reply=q; }
+                return 0 ;;
+        esac
+        printf '\r' > /dev/tty
+    done
+}
+
 # One line of help: what you type, then what it does. Two colours, never one —
 # the key is the only part of the line that is an instruction, and in a single
 # colour it disappears into the sentence explaining it.
@@ -1720,7 +2035,8 @@ help_sort_row() {
 
 browse_help() {
     help_row '23'   'cd into entry 23 — numbers are the ranking, not the page'
-    help_row 'text' 'search labels and paths for "text" (case-insensitive)'
+    help_row 'text' 'search labels and paths for "text" (case-insensitive), newest first'
+    help_row '↑ ↓'  'in a search: move the cursor (ctrl-p / ctrl-n too); enter opens it'
     help_row '/'    'clear the search (and any timeframe), back to the full ranking'
     help_row '@3d text' 'search only what was touched in a timeframe: @today, @yesterday, @week, @month, @3d, @2w'
     help_row '@'    'drop the timeframe, keep the search'
@@ -1826,6 +2142,20 @@ settings_redraw() {
     view_from=$sel_shown
 }
 
+# The line prompt under the listing itself, into `reply`. Fails on EOF.
+read_line_reply() {
+    # Every key on this line is in C_KEY and nothing else is, so the line reads
+    # as a row of buttons with labels rather than as a sentence to be parsed.
+    # The order in force is named here too — it is the one piece of state the
+    # listing above cannot show, and it decides what the numbers mean.
+    local enter="${C_KEY}enter${C_HINT} stays"
+    enter_pages && enter="${C_KEY}enter${C_HINT} more of today ${C_DIM}· ${C_KEY}q${C_HINT} stays"
+    printf "${C_DIM}→ ${C_HINT}number ${C_DIM}· ${C_HINT}text to search ${C_DIM}· ${C_KEY}n${C_DIM}/${C_KEY}p${C_HINT} pages ${C_DIM}· ${C_KEY}s${C_HINT} sort ${C_DIM}(${C_NOW}%s${C_DIM}) · ${C_KEY}c${C_HINT} settings ${C_DIM}· ${C_KEY}?${C_HINT} help ${C_DIM}· %s${C_DIM}: ${C_OFF}" \
+        "$(sort_label)" "$enter" > /dev/tty
+    # A bare `read` with no reply (EOF from ctrl-d) leaves the cursor mid-line.
+    IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 1; }
+}
+
 browse() {
     local dest=$1 reply d
     build_view
@@ -1833,18 +2163,16 @@ browse() {
     # `+` continues the ranking rather than repeating its opening. Only the
     # unfiltered view inherits this; a search starts from its own first result.
     view_from=$sel_shown
+    # A search from the command line printed nothing yet: its answer is the cursor
+    # list, drawn here.
+    if (( lr_list_quiet )); then view_from=0; render_page; fi
 
     while :; do
-        # Every key on this line is in C_KEY and nothing else is, so the line reads
-        # as a row of buttons with labels rather than as a sentence to be parsed.
-        # The order in force is named here too — it is the one piece of state the
-        # listing above cannot show, and it decides what the numbers mean.
-        local enter="${C_KEY}enter${C_HINT} stays"
-        enter_pages && enter="${C_KEY}enter${C_HINT} more of today ${C_DIM}· ${C_KEY}q${C_HINT} stays"
-        printf "${C_DIM}→ ${C_HINT}number ${C_DIM}· ${C_HINT}text to search ${C_DIM}· ${C_KEY}n${C_DIM}/${C_KEY}p${C_HINT} pages ${C_DIM}· ${C_KEY}s${C_HINT} sort ${C_DIM}(${C_NOW}%s${C_DIM}) · ${C_KEY}c${C_HINT} settings ${C_DIM}· ${C_KEY}?${C_HINT} help ${C_DIM}· %s${C_DIM}: ${C_OFF}" \
-            "$(sort_label)" "$enter" > /dev/tty
-        # A bare `read` with no reply (EOF from ctrl-d) leaves the cursor mid-line.
-        IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
+        if view_narrowed && (( ${#view[@]} )); then
+            read_list_reply
+        else
+            read_line_reply || return 0
+        fi
 
         case "$reply" in
             '')
@@ -2145,6 +2473,8 @@ lr_root=""
 lr_cols=80
 lr_no_limit=0
 lr_pretty=1
+lr_search_order=newest
+lr_list_quiet=0
 lr_full=0
 
 # Busy-day focus. When TODAY holds at least focus_min repos (the focus_today
@@ -2492,6 +2822,9 @@ jump_single() {
 # Separate from cmd_repos so the browser can run it again after the settings
 # menu, and redraw with what was just chosen.
 listing_settings() {
+    lr_search_order=${LSRECENT_SEARCH_ORDER:-newest}
+    [[ "$lr_search_order" == newest || "$lr_search_order" == match ]] \
+        || die "LSRECENT_SEARCH_ORDER must be newest or match: $lr_search_order"
     lr_pretty=${LSRECENT_PRETTY_NAMES:-1}
     [[ "$lr_pretty" == 0 || "$lr_pretty" == 1 ]] || die "LSRECENT_PRETTY_NAMES must be 0 or 1: $lr_pretty"
     # Focus only the plain listing. Anything that already narrowed it — a search,
@@ -2562,7 +2895,20 @@ cmd_repos() {
     lr_cols=$(term_cols)
     bucket_repos "$root" "$full"
 
-    if render_listing; then
+    # A search on the command line, answered at a terminal that will prompt: the
+    # numbering is built as usual but not printed, and the browser draws the
+    # matches as the cursor list instead — newest first, the first one under the
+    # cursor, enter to go. Piped, or with no prompt to answer, it is the grouped
+    # listing as before.
+    lr_list_quiet=0
+    if [[ -n "$list_filter" ]] && will_prompt; then
+        if render_listing > /dev/null; then
+            jump_single && return 0
+            lr_list_quiet=1
+            prompt_jump
+            return 0
+        fi
+    elif render_listing; then
         jump_single || prompt_jump
         return 0
     fi
