@@ -322,6 +322,7 @@ what it had just numbered. It accepts more than a number:
 | `s` | cycle the order inside each group: recency → frecency → visits → name |
 | `sr` / `sf` / `sv` / `sn` | go straight to that order — recency, frecency, visits, name |
 | `ss` | **keep** the order in force — every listing starts in it from now on |
+| `c` or `/config` | the [settings menu](#the-settings-menu); the listing redraws with what you chose |
 | `?` | the same summary |
 | enter, `q`, ctrl-d | stay put — except that enter takes the **only match** of a search, and on a [busy day](#busy-days-today-only) shows more of today |
 
@@ -738,8 +739,40 @@ in a file about shells, invisible to the tool that obeys it and unwritable by it
 so `s` at the prompt could find the order you wanted and then had nowhere to put
 it. Since 1.14.0 there is a file, holding the same settings under shorter names.
 
+### The settings menu
+
+`lsrecent config` (or `lsr config`) on its own, or `c` / `/config` at any
+listing prompt, opens a menu, so changing a setting needs no key names or value
+syntax:
+
+```
+settings · saved to ~/.config/lsrecent/config
+   1 sort          recency                    default  order inside each group
+   2 prompt        1                          default  end a listing with the browser prompt
+   3 max_rows      as many as the screen has  default  rows one listing may occupy
+   …
+   7 focus_today   10                         default  repos opened today that make the listing show only today
+   8 pretty_names  1                          default  show repo-names-like-this as repo names like this
+→ number to change · d number resets it (d3) · e edit the file · enter done:
+```
+
+Type a setting's number. An on/off setting flips. `sort` offers its four orders
+by number. Anything else asks for a value, which is checked before it is saved.
+`d3` puts setting 3 back to its default, `e` opens the file in `$EDITOR`, and
+enter leaves. Every change is written to the file straight away. Opened from a
+listing, the menu redraws that listing with the new settings when you leave it,
+so you see what you changed. `repo_root`, `repo_depth` and `noise_pct` take
+effect from the next listing.
+
+Every setting already has a sensible default (busy-day focus on at 10,
+names with spaces, recency order), so the menu is for changing them, not for
+setting anything up.
+
+### From the command line
+
 ```bash
-lsrecent config                      # every setting, its value, and where that value came from
+lsrecent config                      # the menu, on a terminal
+lsrecent config show                 # every setting, its value, and where that value came from
 lsrecent config set sort visits      # ... or press ss at the prompt
 lsrecent config unset sort
 lsrecent config get repo_root

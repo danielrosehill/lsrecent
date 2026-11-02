@@ -1,3 +1,15 @@
+lsrecent (1.16.0) unstable; urgency=low
+
+  * A settings menu: `lsrecent config` on a terminal, or `c` / `/config` at any
+    listing prompt. Every setting numbered with its value and origin; type a
+    number to change it (on/off settings toggle, sort picks from a list, the
+    rest are typed and checked), d<number> resets one, e opens the file. Saved
+    at once. From a listing, the listing redraws with the new settings.
+  * `lsrecent config show` is the old non-interactive listing, and what bare
+    `config` still prints when piped.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Mon, 02 Nov 2026 15:30:00 +0200
+
 lsrecent (1.15.0) unstable; urgency=low
 
   * Busy-day focus. When TODAY holds at least `focus_today` repos (default 10),

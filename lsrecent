@@ -109,6 +109,7 @@
 #   s         cycle the order inside each group: recency → frecency → visits → name
 #   sr  recency    sf  frecency    sv  visits    sn  name
 #   ss        keep that order — every listing starts in it from now on
+#   c         the settings menu (also /config); the listing redraws after it
 #   ?         the same summary          enter, q, ctrl-d   stay put
 #             (on a busy day, enter shows more of today until today runs out)
 #
@@ -140,9 +141,16 @@
 #                            companion; also in the app launcher)
 #
 # Settings (preferences that outlive the shell):
-#   lsrecent config          Every setting, its value, and where that value is
+#   lsrecent config          On a terminal: the settings menu — every setting
+#                            numbered with its value; type a number to change it
+#                            (two-valued ones toggle, sort picks from a list),
+#                            d<number> to reset, e for the file. Saved at once.
+#                            Also `c` (or /config) at any listing prompt, which
+#                            redraws the listing with what you chose.
+#   lsrecent config show     Every setting, its value, and where that value is
 #                            coming from — the file, an LSRECENT_* variable in
-#                            this shell, or the built-in default
+#                            this shell, or the built-in default (also what bare
+#                            `config` prints when piped)
 #   lsrecent config set <setting> <value>
 #   lsrecent config unset <setting>
 #   lsrecent config get <setting>
@@ -186,7 +194,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.15.0"
+VERSION="1.16.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -735,8 +743,151 @@ settings_show() {
     done
     # No settings_complain here: dispatch has already printed the file's bad
     # lines, above this listing, before it knew which command was running.
-    printf "\n${C_DIM}→ ${C_KEY}lsrecent config set ${C_DIM}<${C_HINT}setting${C_DIM}> <${C_HINT}value${C_DIM}> · ${C_KEY}unset ${C_DIM}<${C_HINT}setting${C_DIM}> · ${C_KEY}edit${C_OFF}\n"
+    printf "\n${C_DIM}→ ${C_KEY}lsrecent config${C_HINT} on its own is a menu ${C_DIM}· ${C_KEY}lsrecent config set ${C_DIM}<${C_HINT}setting${C_DIM}> <${C_HINT}value${C_DIM}> · ${C_KEY}unset ${C_DIM}<${C_HINT}setting${C_DIM}> · ${C_KEY}edit${C_OFF}\n"
     return 0
+}
+
+# --- the settings menu --------------------------------------------------------
+#
+# `lsrecent config` on a terminal, and `c` (or /config) at the listing prompt.
+# The point is tinkering: see every setting with its value, pick one by number,
+# change it, see the listing change, without remembering a key name or a value
+# syntax. Every change is written to the settings file at once, so it outlives
+# the shell exactly as `lsrecent config set` would.
+#
+# Line-oriented like the rest of the browser, and on /dev/tty for the same
+# reason: stdout may be a pipe and stdin may be anything.
+
+# The fixed choices a setting has, if it has any. A setting with choices is
+# picked from a numbered list (or toggled, when there are two) rather than typed.
+setting_choices() {
+    case $1 in
+        sort)                 echo "recency frecency visits name" ;;
+        prompt|pretty_names)  echo "0 1" ;;
+    esac
+}
+
+# The value a setting has on this run, whichever layer it came from.
+setting_value() {
+    local var=${settings_var[$1]}
+    if [[ "$(setting_origin "$1")" == default ]]; then setting_default "$1"; else printf '%s' "${!var}"; fi
+}
+
+# Apply a change to this process as well as to the file, so a listing re-drawn
+# after the menu shows it. Not where an export outranks the file: there the file
+# has changed and this run has not, and warn_env_wins says which variable to
+# unset. With no value, back to the default.
+setting_apply() {
+    local key=$1 var=${settings_var[$1]}
+    if [[ -n "${!var+set}" && -z "${settings_from[$key]:-}" ]]; then
+        warn_env_wins "$key" > /dev/tty
+        return 1
+    fi
+    if (( $# >= 2 )); then
+        printf -v "$var" '%s' "$2"; settings_from[$key]=1
+    else
+        unset "$var"; unset 'settings_from[$key]'
+    fi
+    return 0
+}
+
+menu_changed=0
+settings_menu() {
+    local reply i k
+    while :; do
+        printf "\n${C_HINT}settings ${C_DIM}· saved to %s${C_OFF}\n" "$settings_file" > /dev/tty
+        # Sized to the longest value, since a default like "as many as the screen
+        # has" or a repo_root path would otherwise weld itself to the next column.
+        local -a vals=() ; local w=8
+        for k in "${settings_keys[@]}"; do
+            vals+=( "$(setting_value "$k")" )
+            (( ${#vals[-1]} + 2 > w )) && w=$(( ${#vals[-1]} + 2 ))
+        done
+        i=0
+        for k in "${settings_keys[@]}"; do
+            printf "  ${C_KEY}%2d${C_OFF} %-14s${C_NOW}%-*s${C_DIM}%-9s${C_HINT}%s${C_OFF}\n" \
+                "$(( i + 1 ))" "$k" "$w" "${vals[i]}" "$(setting_origin "$k")" "$(setting_desc "$k")" > /dev/tty
+            (( ++i ))
+        done
+        printf "${C_DIM}→ ${C_HINT}number to change ${C_DIM}· ${C_KEY}d${C_HINT} number resets it ${C_DIM}(${C_KEY}d3${C_DIM}) · ${C_KEY}e${C_HINT} edit the file ${C_DIM}· ${C_KEY}enter${C_HINT} done${C_DIM}: ${C_OFF}" > /dev/tty
+        IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
+        reply=${reply// /}
+        case "$reply" in
+            ''|q|Q) return 0 ;;
+            e|E)
+                ensure_settings
+                "${EDITOR:-nano}" "$settings_file" < /dev/tty > /dev/tty
+                # Re-read: what the editor wrote is now the file, and the
+                # settings_from bookkeeping has to describe it.
+                for k in "${settings_keys[@]}"; do
+                    [[ -n "${settings_from[$k]:-}" ]] && { local v=${settings_var[$k]}; unset "$v"; }
+                done
+                settings_from=(); settings_bad=()
+                load_settings; settings_complain 2> /dev/tty
+                menu_changed=1; continue ;;
+            d[0-9]*|D[0-9]*)
+                i=${reply:1}
+                [[ "$i" =~ ^[0-9]+$ ]] && (( i >= 1 && i <= ${#settings_keys[@]} )) || {
+                    printf "${C_HINT}no setting ${C_NOW}%s${C_OFF}\n" "$i" > /dev/tty; continue; }
+                k=${settings_keys[i-1]}
+                write_setting "$k"
+                setting_apply "$k" && menu_changed=1
+                printf "${C_HINT}%s is back to its default ${C_DIM}(${C_NOW}%s${C_DIM})${C_OFF}\n" "$k" "$(setting_default "$k")" > /dev/tty
+                continue ;;
+        esac
+        if [[ ! "$reply" =~ ^[0-9]+$ ]] || (( reply < 1 || reply > ${#settings_keys[@]} )); then
+            printf "${C_HINT}no setting ${C_NOW}%s${C_DIM} — ${C_HINT}1-%d${C_OFF}\n" "$reply" "${#settings_keys[@]}" > /dev/tty
+            continue
+        fi
+        setting_edit "${settings_keys[reply-1]}"
+    done
+}
+
+setting_edit() {
+    local key=$1 cur val reply i
+    cur=$(setting_value "$key")
+    local -a ch=( $(setting_choices "$key") )
+    if [[ "${ch[*]}" == "0 1" ]]; then
+        # Two values: choosing it is the change. Asking "which of the two?"
+        # after you have already said "this one" is a question with one answer.
+        [[ "$cur" == 1 ]] && val=0 || val=1
+    else
+        printf "  ${C_HINT}%s ${C_DIM}— %s${C_OFF}\n" "$(setting_desc "$key")" "$(setting_values "$key")" > /dev/tty
+        if (( ${#ch[@]} )); then
+            printf "  " > /dev/tty
+            for i in "${!ch[@]}"; do
+                printf "${C_KEY}%d${C_OFF} %s  " "$(( i + 1 ))" "${ch[i]}" > /dev/tty
+            done
+            printf '\n' > /dev/tty
+        fi
+        printf "${C_DIM}→ ${C_HINT}new value for ${C_NOW}%s${C_HINT} (now ${C_NOW}%s${C_HINT}) ${C_DIM}· ${C_KEY}d${C_HINT} default ${C_DIM}· ${C_KEY}enter${C_HINT} keeps it${C_DIM}: ${C_OFF}" \
+            "$key" "$cur" > /dev/tty
+        IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
+        reply=${reply#"${reply%%[![:space:]]*}"}; reply=${reply%"${reply##*[![:space:]]}"}
+        [[ -n "$reply" ]] || return 0
+        if [[ "$reply" == d || "$reply" == D ]]; then
+            write_setting "$key"
+            setting_apply "$key" && menu_changed=1
+            printf "${C_HINT}%s is back to its default ${C_DIM}(${C_NOW}%s${C_DIM})${C_OFF}\n" "$key" "$(setting_default "$key")" > /dev/tty
+            return 0
+        fi
+        val=$reply
+        if (( ${#ch[@]} )) && [[ "$reply" =~ ^[0-9]+$ ]] && (( reply >= 1 && reply <= ${#ch[@]} )); then
+            val=${ch[reply-1]}
+        fi
+    fi
+    if ! setting_check "$key" "$val"; then
+        printf "${C_HINT}%s must be %s ${C_DIM}— unchanged${C_OFF}\n" "$key" "$(setting_values "$key")" > /dev/tty
+        return 0
+    fi
+    [[ "$key" == repo_root ]] && val=${val/#\~/$HOME}
+    write_setting "$key" "$val"
+    setting_apply "$key" "$val" && menu_changed=1
+    printf "${C_HINT}saved: ${C_NOW}%s = %s${C_OFF}\n" "$key" "$val" > /dev/tty
+    case $key in
+        repo_root|repo_depth|noise_pct)
+            printf "${C_DIM}  (takes effect from the next listing)${C_OFF}\n" > /dev/tty ;;
+    esac
 }
 
 # Built by hand rather than with `IFS=', '` and `${settings_keys[*]}`, which
@@ -748,9 +899,17 @@ settings_key_list() {
 }
 
 cmd_config() {
-    local action=${1:-show} key=${2:-}
+    local action=${1:-} key=${2:-}
+    # Bare `lsrecent config` on a terminal is the menu; piped, or as `config
+    # show`, it is the listing it always was.
+    if [[ -z "$action" ]]; then
+        if [[ -t 1 && -r /dev/tty && -w /dev/tty ]]; then settings_menu; return 0; fi
+        action=show
+    fi
     case "$action" in
-        show|list|"")
+        menu)
+            settings_menu ;;
+        show|list)
             settings_show ;;
         get)
             [[ -n "$key" ]] || die "which setting? ($(settings_key_list))"
@@ -783,7 +942,7 @@ cmd_config() {
         path)
             printf '%s\n' "$settings_file" ;;
         *)
-            die "unknown config command: $action (show, get, set, unset, edit, path)" ;;
+            die "unknown config command: $action (menu, show, get, set, unset, edit, path)" ;;
     esac
 }
 
@@ -1575,6 +1734,7 @@ browse_help() {
     help_sort_row 'sv' activity
     help_sort_row 'sn' name
     help_row 'ss'   'keep the order in force — every listing starts in it from now on'
+    help_row 'c'    'settings menu (also /config) — change a setting, saved, listing redrawn'
     help_row '?'    'this'
     if (( focus_n )); then
         help_row 'enter' 'more of today, while there is more — then stay put'
@@ -1642,6 +1802,30 @@ enter_pages() {
     (( focus_n > 0 && view_since == 0 && view_from < focus_n )) && [[ -z "$view_filter" ]]
 }
 
+# The settings menu from inside a listing, then the listing again in whatever
+# was chosen — the redraw is the point: tinkering means seeing the effect.
+settings_redraw() {
+    local old_sort=${LSRECENT_SORT:-}
+    menu_changed=0
+    settings_menu
+    (( menu_changed )) || return 0
+    if [[ "${LSRECENT_SORT:-}" != "$old_sort" ]]; then
+        case "${LSRECENT_SORT:-}" in
+            frecency)        sort_mode=frecency ;;
+            visits|activity) sort_mode=activity ;;
+            name)            sort_mode=name ;;
+            *)               sort_mode=time ;;
+        esac
+    fi
+    listing_settings
+    bucket_repos "$lr_root" "$lr_full"
+    printf "${C_DIM}— redrawn with the new settings, renumbered${C_OFF}\n" > /dev/tty
+    render_listing
+    view_filter=''; view_since=0; view_since_label=''
+    build_view
+    view_from=$sel_shown
+}
+
 browse() {
     local dest=$1 reply d
     build_view
@@ -1657,7 +1841,7 @@ browse() {
         # listing above cannot show, and it decides what the numbers mean.
         local enter="${C_KEY}enter${C_HINT} stays"
         enter_pages && enter="${C_KEY}enter${C_HINT} more of today ${C_DIM}· ${C_KEY}q${C_HINT} stays"
-        printf "${C_DIM}→ ${C_HINT}number ${C_DIM}· ${C_HINT}text to search ${C_DIM}· ${C_KEY}n${C_DIM}/${C_KEY}p${C_HINT} pages ${C_DIM}· ${C_KEY}s${C_HINT} sort ${C_DIM}(${C_NOW}%s${C_DIM}) · ${C_KEY}?${C_HINT} help ${C_DIM}· %s${C_DIM}: ${C_OFF}" \
+        printf "${C_DIM}→ ${C_HINT}number ${C_DIM}· ${C_HINT}text to search ${C_DIM}· ${C_KEY}n${C_DIM}/${C_KEY}p${C_HINT} pages ${C_DIM}· ${C_KEY}s${C_HINT} sort ${C_DIM}(${C_NOW}%s${C_DIM}) · ${C_KEY}c${C_HINT} settings ${C_DIM}· ${C_KEY}?${C_HINT} help ${C_DIM}· %s${C_DIM}: ${C_OFF}" \
             "$(sort_label)" "$enter" > /dev/tty
         # A bare `read` with no reply (EOF from ctrl-d) leaves the cursor mid-line.
         IFS= read -r reply < /dev/tty || { printf '\n' > /dev/tty; return 0; }
@@ -1745,6 +1929,8 @@ browse() {
                 sort_mode=name;     resort; continue ;;
             ss|SS|save|keep)
                 save_sort; continue ;;
+            c|C|/c|/config|/settings|/set)
+                settings_redraw; continue ;;
             /)
                 view_filter=''; view_since=0; view_since_label=''
                 build_view; render_top; continue ;;
@@ -1959,6 +2145,7 @@ lr_root=""
 lr_cols=80
 lr_no_limit=0
 lr_pretty=1
+lr_full=0
 
 # Busy-day focus. When TODAY holds at least focus_min repos (the focus_today
 # setting, default 10), the first screen is today and nothing else: on a day you
@@ -2301,6 +2488,20 @@ jump_single() {
     return 0
 }
 
+# The settings a drawn listing depends on, read into the variables that drive it.
+# Separate from cmd_repos so the browser can run it again after the settings
+# menu, and redraw with what was just chosen.
+listing_settings() {
+    lr_pretty=${LSRECENT_PRETTY_NAMES:-1}
+    [[ "$lr_pretty" == 0 || "$lr_pretty" == 1 ]] || die "LSRECENT_PRETTY_NAMES must be 0 or 1: $lr_pretty"
+    # Focus only the plain listing. Anything that already narrowed it — a search,
+    # a timeframe, --today, --all — has said what it wants to see.
+    focus_min=${LSRECENT_FOCUS_TODAY:-10}
+    [[ "$focus_min" =~ ^[0-9]+$ ]] || die "LSRECENT_FOCUS_TODAY must be a number: $focus_min"
+    focus_min=$(( 10#$focus_min ))
+    if (( lr_no_limit || since_lo )) || [[ -n "$window$list_filter" ]]; then focus_min=0; fi
+}
+
 cmd_repos() {
     local want_window="" full=0 root="" since_spec=""
     # Set before the loop, so an explicit flag on the command line still wins.
@@ -2351,14 +2552,8 @@ cmd_repos() {
     root=$(resolve "$root") || die "no such directory: $root"
     [[ -d "$root" ]] || die "not a directory: $root"
 
-    lr_pretty=${LSRECENT_PRETTY_NAMES:-1}
-    [[ "$lr_pretty" == 0 || "$lr_pretty" == 1 ]] || die "LSRECENT_PRETTY_NAMES must be 0 or 1: $lr_pretty"
-    # Focus only the plain listing. Anything that already narrowed it — a search,
-    # a timeframe, --today, --all — has said what it wants to see.
-    focus_min=${LSRECENT_FOCUS_TODAY:-10}
-    [[ "$focus_min" =~ ^[0-9]+$ ]] || die "LSRECENT_FOCUS_TODAY must be a number: $focus_min"
-    focus_min=$(( 10#$focus_min ))
-    if (( lr_no_limit || since_lo )) || [[ -n "$window$list_filter" ]]; then focus_min=0; fi
+    lr_full=$full
+    listing_settings
 
     load_visits
     collect_repos "$root" || die "no git repositories under $root"
