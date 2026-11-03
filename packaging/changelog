@@ -1,3 +1,18 @@
+lsrecent (1.18.0) unstable; urgency=low
+
+  * Two new orders: created (sc, --created/-C), newest repository first by
+    GitHub creation date, and pushed (sp, --pushed/-P), most recently pushed
+    first. Dates come from a cache of the GitHub API refreshed in the
+    background (~/.cache/lsrecent/github-dates.tsv, every 6h by default,
+    LSRECENT_GH_CACHE_HOURS), falling back to the .git birth time and the
+    remote-tracking refs for repos it does not know yet. `lsrecent
+    refresh-dates` fetches now.
+  * The sort keys are on a small grey line above the listing, with the order in
+    force lit, instead of only in the prompt line and ? help. `a all` is there
+    too, so at a prompt the footer no longer ends in `lsrepos --all`.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Tue, 03 Nov 2026 18:30:00 +0200
+
 lsrecent (1.17.0) unstable; urgency=low
 
   * Search results are newest first, one per row, each with when it was last

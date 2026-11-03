@@ -92,6 +92,7 @@ lsr wms               # the same, by the shortest route
 lstoday claude        # today's work, narrowed
 
 lsrecent noise        # what a tree-wide sweep is being stopped from dating
+lsrecent refresh-dates # fetch GitHub creation/push dates now (sc / sp orders)
 
 lsrp                  # fzf picker over every repo, then cd into it
 lsrt / lsry           # same, restricted to today's / yesterday's
@@ -220,14 +221,27 @@ thing you were in is nearly always the thing you are going back to, and it shoul
 be line 1 rather than wherever its initial falls. `sn` at the prompt is one
 keystroke away when you want the alphabet back.
 
-There are four orders. `s` at the prompt cycles them, and `sr` / `sf` / `sv` /
-`sn` jump straight to one, without leaving the listing:
+There are six orders. `s` at the prompt cycles them, and `sr` / `sf` / `sv` /
+`sc` / `sp` / `sn` jump straight to one, without leaving the listing. At a
+prompt, the keys sit on one small grey line *above* the listing, with the order
+in force lit up, rather than under a long list where nobody scrolls to them:
+
+```
+sr recency  sf frecency  sv visits  sc created  sp pushed  sn name · a all · ss keep
+━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+`a` (everything, unpaged) lives there too, so the footer under a cut listing no
+longer ends in `lsrepos --all`. Piped, or with `prompt = 0`, there is no bar and
+the footer names `--all` as before.
 
 | Flag | Prompt key | Order inside a bucket |
 | --- | --- | --- |
 | `--recency` (`-t`) | `sr` | most recently opened first — **the default** |
 | `--frecency` (`-f`) | `sf` | visits first, most recent breaking the ties |
 | `--visits` (`-A`) | `sv` | busiest first: how many times you opened it *that day* |
+| `--created` (`-C`) | `sc` | newest repository first, by GitHub creation date |
+| `--pushed` (`-P`) | `sp` | most recently pushed first — what you shipped, not just opened |
 | `--name` (`-n`) | `sn` | alphabetical, case-insensitive |
 
 **Frecency is the two signals together**, because neither alone is the question
@@ -236,6 +250,19 @@ once at lunch; among repos with equal visits the newest wins. It differs from
 `sv` exactly at the ties, and the ties are most of a bucket: `sv` sends them to
 the alphabet, `sf` leaves them in recency order, so a bucket nobody visited looks
 like `sr` rather than like `sn`.
+
+**Created and pushed come from GitHub, through a cache.** Asking GitHub for
+~2,700 repos' dates takes about 30 seconds, so the answer is kept in
+`~/.cache/lsrecent/github-dates.tsv` (`owner/repo`, created, pushed, as epochs)
+and refreshed in the background whenever one of these orders is used and the
+file is older than `LSRECENT_GH_CACHE_HOURS` (default 6). `lsrecent
+refresh-dates` fetches it now, in the foreground. Repos are matched to GitHub by
+their `origin` URL. Local evidence covers what the cache cannot know yet: a repo
+GitHub has not been asked about takes its creation date from the birth time of
+its `.git` directory (right for `gh repo create --clone`, the clone date for
+anything cloned later), and the pushed date is whichever is newer of GitHub's and
+the newest file under `.git/refs/remotes`, which a push from this machine
+rewrites. A repo with neither sorts last in its bucket.
 
 `--time` and `--activity` are the older spellings of `--recency` and `--visits`
 and still work, as do `LSRECENT_SORT=time` and `=activity`.
@@ -582,7 +609,7 @@ question pushing it out of view. So when TODAY holds at least `focus_today` repo
   1 lsrecent                      2 Personal Blog Manager Plugin
  …
  31 eval                         32 Daniel WhatsApp Plugin
-… a busy day, so today only: 1-32 of 49 · enter for more of today · 669 older after them · lsrepos --all for everything
+… a busy day, so today only: 1-32 of 49 · enter for more of today · 669 older after them
 → number · text to search · n/p pages · s sort (recency) · ? help · enter more of today · q stays:
  33 Claude Visual Communications Plugin   34 Claude Digital Printing Plugin
  …
@@ -791,7 +818,7 @@ settings · saved to ~/.config/lsrecent/config
 → number to change · d number resets it (d3) · e edit the file · enter done:
 ```
 
-Type a setting's number. An on/off setting flips, and so does `search_order`. `sort` offers its four orders
+Type a setting's number. An on/off setting flips, and so does `search_order`. `sort` offers its six orders
 by number. Anything else asks for a value, which is checked before it is saved.
 `d3` puts setting 3 back to its default, `e` opens the file in `$EDITOR`, and
 enter leaves. Every change is written to the file straight away. Opened from a
@@ -817,7 +844,7 @@ lsrecent config path
 
 | Setting | Variable | Accepts | Default |
 | --- | --- | --- | --- |
-| `sort` | `LSRECENT_SORT` | `recency`, `frecency`, `visits`, `name` | `recency` |
+| `sort` | `LSRECENT_SORT` | `recency`, `frecency`, `visits`, `created`, `pushed`, `name` | `recency` |
 | `prompt` | `LSRECENT_PROMPT` | `0`, `1` | `1` |
 | `max_rows` | `LSRECENT_MAX_ROWS` | a number, `0` for unlimited | as many as the screen has |
 | `noise_pct` | `LSRECENT_NOISE_PCT` | 0–100 | `50` |

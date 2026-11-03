@@ -47,9 +47,9 @@
 # 2 DAYS AGO through 7 DAYS AGO — and then PAST MONTH, PAST 3 MONTHS and OLDER. A
 # repo has one timestamp, so it appears under exactly one of them.
 #
-# Ordering. Groups run newest-first. Within a group the order is one of four;
-# `s` at the prompt cycles them and `sr`/`sf`/`sv`/`sn` jump straight to one,
-# without leaving the listing:
+# Ordering. Groups run newest-first. Within a group the order is one of six;
+# `s` at the prompt cycles them and `sr`/`sf`/`sv`/`sc`/`sp`/`sn` jump straight to
+# one, without leaving the listing. The keys are on a small line above the listing:
 #   --recency  (-t)  most recently opened first — the default, and what TODAY is
 #                    usually being read for: the last thing you were in is the
 #                    first line on the screen. (--time is the old spelling.)
@@ -62,6 +62,12 @@
 #                    beats the one you opened once at lunch, and among equals the
 #                    newest wins. A bucket nobody visited is all zeroes, so it
 #                    stays in recency order rather than collapsing to the alphabet.
+#   --created  (-C)  newest repo first, by GitHub creation date — today's work
+#                    led by what you started today
+#   --pushed   (-P)  most recently pushed first — what you shipped, as against
+#                    what you only opened
+#                    (both read a cache of GitHub dates refreshed in the
+#                    background, with local fallbacks; see load_repo_dates)
 #   --name     (-n)  alphabetical — a bucket you scan for a name you already have
 #                    in mind
 # The default is whichever `sort` the settings file names, or recency. `ss` at the
@@ -77,6 +83,7 @@
 # LSRECENT_NOISE_PCT (default 50) of all repos is treated as a bulk touch: those
 # dates are discarded, the repos land in UNDATED rather than TODAY, and a footer
 # says so. Visit-log dates are never discarded — a bulk command opens nothing.
+#   lsrecent refresh-dates   Fetch GitHub creation/push dates now (~30s)
 #   lsrecent noise           What is being suppressed, and why
 #   lsrecent noise add [day] Suppress a day by hand (default: today)
 #   lsrecent noise remove <day>
@@ -163,7 +170,7 @@
 #   lsrecent config path     Where the file is
 # The settings, each also an LSRECENT_* variable (LSRECENT_FOCUS_TODAY,
 # LSRECENT_PRETTY_NAMES, LSRECENT_SEARCH_ORDER for the last three):
-#   sort        recency, frecency, visits or name
+#   sort        recency, frecency, visits, created, pushed or name
 #   prompt      1 to end a listing with the browser prompt, 0 for listing only
 #   max_rows    rows one listing may occupy, 0 for unlimited
 #   noise_pct   share of repos on one inferred day that makes it a bulk touch
@@ -201,7 +208,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.17.0"
+VERSION="1.18.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -549,7 +556,7 @@ setting_desc() {
 # itself, so the three cannot drift apart.
 setting_values() {
     case $1 in
-        sort)       echo "recency, frecency, visits or name" ;;
+        sort)       echo "recency, frecency, visits, created, pushed or name" ;;
         prompt)     echo "0 or 1" ;;
         max_rows)   echo "a number, 0 for unlimited" ;;
         noise_pct)  echo "a number from 0 to 100" ;;
@@ -586,7 +593,7 @@ setting_check() {
             # a value that works in the environment must work in the file, or the
             # file is a second dialect of the same setting.
             case "$val" in
-                recency|recent|time|frecency|visits|activity|name) ;;
+                recency|recent|time|frecency|visits|activity|created|pushed|name) ;;
                 *) return 1 ;;
             esac ;;
         prompt|pretty_names) [[ "$val" == 0 || "$val" == 1 ]] || return 1 ;;
@@ -776,7 +783,7 @@ settings_show() {
 # picked from a numbered list (or toggled, when there are two) rather than typed.
 setting_choices() {
     case $1 in
-        sort)                 echo "recency frecency visits name" ;;
+        sort)                 echo "recency frecency visits created pushed name" ;;
         prompt|pretty_names)  echo "0 1" ;;
         search_order)         echo "newest match" ;;
     esac
@@ -1291,6 +1298,145 @@ sorted_repos() {
             printf '%s\t%s\n' "${repo_ts[$p]}" "${p#"$root"/}"
         fi
     done | sort -rn
+}
+
+# ---------------------------------------------------------------------------
+# Creation and push dates, for the `created` and `pushed` orders
+# ---------------------------------------------------------------------------
+#
+# GitHub knows when a repo was created and last pushed; asking it costs about
+# 30 seconds for ~2,700 repos (REST, 28 pages, measured 2026-11-03; the GraphQL
+# `gh repo list` took 51s). That cannot sit in front of a listing, so it lands in
+# a cache file — "owner/repo<TAB>created<TAB>pushed", owner/repo lowercased,
+# epochs — refreshed in the background whenever one of these orders is used and
+# the file is older than LSRECENT_GH_CACHE_HOURS (default 6). `lsrecent
+# refresh-dates` runs the same fetch in the foreground.
+#
+# Local evidence covers what the cache cannot yet know, and is what makes the
+# order right on the day it matters — the repo created an hour ago is not in a
+# six-hour-old cache:
+#   created  the birth time of the repo's .git directory (statx; 0 where the
+#            filesystem does not record it). For `gh repo create --clone` that is
+#            the creation; for an old repo cloned recently it is the clone, which
+#            is why the cache wins whenever it has the repo.
+#   pushed   the newest mtime under .git/refs/remotes — a push from here rewrites
+#            the remote-tracking ref. Taken as max(cache, local), since either can
+#            be the fresher of the two.
+# A repo with neither sorts last in its group.
+gh_cache="${XDG_CACHE_HOME:-$HOME/.cache}/lsrecent/github-dates.tsv"
+
+declare -A created_ts=()
+declare -A pushed_ts=()
+repo_dates_loaded=0
+
+fetch_gh_dates() {
+    command -v gh >/dev/null || { echo "lsrecent: gh is not installed" >&2; return 1; }
+    mkdir -p "${gh_cache%/*}"
+    local tmp="$gh_cache.tmp.$$"
+    if gh api --paginate 'user/repos?per_page=100&affiliation=owner,organization_member,collaborator' \
+            -q '.[] | [(.full_name|ascii_downcase), (.created_at|fromdateiso8601), ((.pushed_at // .created_at)|fromdateiso8601)] | @tsv' \
+            > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
+        mv -f "$tmp" "$gh_cache"
+    else
+        rm -f "$tmp"
+        return 1
+    fi
+}
+
+# Start a background refresh if the cache is missing or stale and no refresh is
+# already running. The lock is a directory (mkdir is atomic); one older than ten
+# minutes is a refresh that died and is cleared.
+refresh_gh_dates_bg() {
+    command -v gh >/dev/null || return 0
+    local hours=${LSRECENT_GH_CACHE_HOURS:-6}
+    [[ "$hours" =~ ^[0-9]+$ ]] || hours=6
+    if [[ -f "$gh_cache" ]] && [[ -z $(find "$gh_cache" -mmin "+$(( 10#$hours * 60 ))" 2>/dev/null) ]]; then
+        return 0
+    fi
+    local lock="$gh_cache.lock"
+    mkdir -p "${gh_cache%/*}"
+    [[ -n $(find "$lock" -maxdepth 0 -mmin +10 2>/dev/null) ]] && rmdir "$lock" 2>/dev/null
+    mkdir "$lock" 2>/dev/null || return 0
+    ( trap 'rmdir "$lock" 2>/dev/null' EXIT; fetch_gh_dates ) \
+        </dev/null >/dev/null 2>&1 &
+    disown 2>/dev/null || true
+}
+
+# Fill created_ts / pushed_ts for every repo in repo_ts. Lazy: only the two
+# orders that need it pay for it, and only once per run. Three forks however
+# many repos — one awk over the configs, one stat, one find.
+load_repo_dates() {
+    (( repo_dates_loaded )) && return 0
+    repo_dates_loaded=1
+    created_ts=(); pushed_ts=()
+    (( ${#repo_ts[@]} )) || return 0
+
+    refresh_gh_dates_bg
+
+    local -A gh_c=() gh_p=()
+    local n c p
+    if [[ -r "$gh_cache" ]]; then
+        while IFS=$'\t' read -r n c p; do
+            [[ -n "$n" ]] || continue
+            gh_c[$n]=$c; gh_p[$n]=$p
+        done < "$gh_cache"
+    fi
+
+    local -a gits=()
+    for p in "${!repo_ts[@]}"; do gits+=("$p/.git"); done
+
+    # The origin remote's URL, from the [remote "origin"] section of each config.
+    local -A slug=()
+    local file url s
+    while IFS=$'\t' read -r file url; do
+        [[ "$url" =~ github\.com[:/]+([^/]+)/([^/]+)$ ]] || continue
+        s="${BASH_REMATCH[1]}/${BASH_REMATCH[2]%.git}"
+        slug[${file%/.git/config}]=${s,,}
+    done < <(printf '%s/config\0' "${gits[@]}" | xargs -0 awk '
+        FNR == 1 { inorigin = 0 }
+        /^[ \t]*\[/ { inorigin = ($0 ~ /^[ \t]*\[remote "origin"\]/) ; next }
+        inorigin && /^[ \t]*url[ \t]*=/ { sub(/^[ \t]*url[ \t]*=[ \t]*/, ""); sub(/[ \t]+$/, ""); print FILENAME "\t" $0; inorigin = 0 }
+    ' 2>/dev/null)
+
+    # Local birth time of .git.
+    local -A born=()
+    local t
+    while IFS=$'\t' read -r t file; do
+        [[ "$t" =~ ^[0-9]+$ ]] && (( t > 0 )) && born[${file%/.git}]=$t
+    done < <(printf '%s\0' "${gits[@]}" | xargs -0 stat --printf '%W\t%n\n' 2>/dev/null)
+
+    # Newest remote-tracking ref per repo.
+    local -A refpush=()
+    local -a remdirs=()
+    for p in "${!repo_ts[@]}"; do
+        [[ -d "$p/.git/refs/remotes" ]] && remdirs+=("$p/.git/refs/remotes")
+    done
+    if (( ${#remdirs[@]} )); then
+        while IFS=$'\t' read -r t file; do
+            t=${t%%.*}
+            file=${file%%/.git/refs/remotes/*}
+            (( t > ${refpush[$file]:-0} )) && refpush[$file]=$t
+        done < <(printf '%s\0' "${remdirs[@]}" | xargs -0 sh -c 'find "$@" -type f -printf "%T@\t%p\n"' _ 2>/dev/null)
+    fi
+
+    for p in "${!repo_ts[@]}"; do
+        s=${slug[$p]:-}
+        if [[ -n "$s" && -v gh_c[$s] ]]; then
+            created_ts[$p]=${gh_c[$s]}
+        else
+            created_ts[$p]=${born[$p]:-0}
+        fi
+        t=0
+        [[ -n "$s" && -v gh_p[$s] ]] && t=${gh_p[$s]}
+        (( ${refpush[$p]:-0} > t )) && t=${refpush[$p]}
+        pushed_ts[$p]=$t
+    done
+}
+
+cmd_refresh_dates() {
+    printf 'fetching creation and push dates from GitHub (about 30s) ...\n' >&2
+    fetch_gh_dates || die "could not fetch from GitHub (is gh logged in?)"
+    printf '%s repos → %s\n' "$(wc -l < "$gh_cache")" "$gh_cache"
 }
 
 # ---------------------------------------------------------------------------
@@ -2044,10 +2190,12 @@ browse_help() {
     help_row 'p  -' 'previous page'
     help_row 't'    'back to the top of this view'
     help_row 'a'    'everything in this view, unpaged'
-    help_row 's'    "cycle the order: recency → frecency → visits → name"
+    help_row 's'    "cycle the order: recency → frecency → visits → created → pushed → name"
     help_sort_row 'sr' time
     help_sort_row 'sf' frecency
     help_sort_row 'sv' activity
+    help_sort_row 'sc' created
+    help_sort_row 'sp' pushed
     help_sort_row 'sn' name
     help_row 'ss'   'keep the order in force — every listing starts in it from now on'
     help_row 'c'    'settings menu (also /config) — change a setting, saved, listing redrawn'
@@ -2080,7 +2228,7 @@ save_sort() {
 # running the command again would. Cheap, too: the buckets are already built, so
 # nothing is stat'd or read a second time.
 resort() {
-    printf "${C_DIM}within each group: ${C_NOW}%s${C_DIM} — %s, renumbered ${C_DIM}· ${C_KEY}ss${C_HINT} keeps it${C_OFF}\n" \
+    printf "${C_DIM}— ${C_NOW}%s${C_DIM}: %s, renumbered${C_OFF}\n" \
         "$(sort_label)" "$(sort_desc)" > /dev/tty
     render_listing
     build_view
@@ -2129,6 +2277,8 @@ settings_redraw() {
         case "${LSRECENT_SORT:-}" in
             frecency)        sort_mode=frecency ;;
             visits|activity) sort_mode=activity ;;
+            created)         sort_mode=created ;;
+            pushed)          sort_mode=pushed ;;
             name)            sort_mode=name ;;
             *)               sort_mode=time ;;
         esac
@@ -2238,7 +2388,9 @@ browse() {
                 case "$sort_mode" in
                     time)     sort_mode=frecency ;;
                     frecency) sort_mode=activity ;;
-                    activity) sort_mode=name ;;
+                    activity) sort_mode=created ;;
+                    created)  sort_mode=pushed ;;
+                    pushed)   sort_mode=name ;;
                     *)        sort_mode=time ;;
                 esac
                 resort; continue ;;
@@ -2255,6 +2407,10 @@ browse() {
                 sort_mode=frecency; resort; continue ;;
             sn|SN|alpha)
                 sort_mode=name;     resort; continue ;;
+            sc|SC|created|newest)
+                sort_mode=created;  resort; continue ;;
+            sp|SP|pushed)
+                sort_mode=pushed;   resort; continue ;;
             ss|SS|save|keep)
                 save_sort; continue ;;
             c|C|/c|/config|/settings|/set)
@@ -2592,6 +2748,8 @@ declare -a ord_count=()
 #   frecency  score descending, then position — where position is the entry's
 #             index in the bucket as built, which is newest-first, so this is
 #             "busiest, most recent breaking the ties"
+#   created   the same key, the score being the creation epoch (load_repo_dates)
+#   pushed    the same key, the score being the last-push epoch
 # The label, never the whole line — the path after it would otherwise decide ties
 # by topic folder, so two repos with the same name would sort apart from where
 # their names put them. (Under --full the label *is* topic/repo and sorts by topic
@@ -2620,9 +2778,10 @@ order_listing() {
     local -a key=()
     case "$sort_mode" in
         activity) key=( -k1,1n -k2,2nr -k4,4f ) ;;
-        frecency) key=( -k1,1n -k2,2nr -k3,3n ) ;;
+        frecency|created|pushed) key=( -k1,1n -k2,2nr -k3,3n ) ;;
         *)        key=( -k1,1n -k4,4f ) ;;
     esac
+    [[ "$sort_mode" == created || "$sort_mode" == pushed ]] && load_repo_dates
 
     local -a flat=()
     mapfile -t flat < <(
@@ -2632,6 +2791,10 @@ order_listing() {
             for e in "${!ref}"; do
                 if [[ "$sort_mode" == name ]]; then
                     activity=0
+                elif [[ "$sort_mode" == created ]]; then
+                    activity=${created_ts[${e#*$'\t'}]:-0}
+                elif [[ "$sort_mode" == pushed ]]; then
+                    activity=${pushed_ts[${e#*$'\t'}]:-0}
                 else
                     activity_since "${group_cutoff[$i]}" "${e#*$'\t'}"
                 fi
@@ -2667,6 +2830,8 @@ sort_label() {
         time)     echo "recency" ;;
         activity) echo "visits" ;;
         frecency) echo "frecency" ;;
+        created)  echo "created" ;;
+        pushed)   echo "pushed" ;;
         *)        echo "name" ;;
     esac
 }
@@ -2676,8 +2841,52 @@ sort_desc() {
         time)     echo "most recently opened first" ;;
         activity) echo "busiest first, inside the bucket's own day" ;;
         frecency) echo "busiest first, most recent breaking the ties" ;;
+        created)  echo "newest repo first (GitHub creation date)" ;;
+        pushed)   echo "most recently pushed first" ;;
         *)        echo "alphabetical" ;;
     esac
+}
+
+# The orders, in one small line above the listing rather than under it. Under it
+# they were the last thing on a long screen, below the footer, and on a busy day
+# the part you never scrolled to. Dim, so the listing is still what you read
+# first; the order in force is lit, so "which order am I in" is answered by
+# looking. `a` is here too: the way to everything belongs with the ways to
+# re-order it, not at the bottom of a list it has already overflowed.
+sort_bar() {
+    local m k out='' plain='' cols=${lr_cols:-80}
+    for m in time frecency activity created pushed name; do
+        case $m in
+            time) k=sr ;; frecency) k=sf ;; activity) k=sv ;;
+            created) k=sc ;; pushed) k=sp ;; *) k=sn ;;
+        esac
+        [[ -n "$plain" ]] && { out+="  "; plain+="  "; }
+        if [[ "$sort_mode" == "$m" ]]; then
+            out+="${C_KEY}$k ${C_NOW}$(sort_label "$m")${C_OFF}"
+        else
+            out+="${C_KEY}$k ${C_DIM}$(sort_label "$m")${C_OFF}"
+        fi
+        plain+="$k $(sort_label "$m")"
+    done
+    # The extras go on only while the line still fits: a sort bar that wraps is
+    # two lines of chrome above the thing you came to read.
+    local extra=" · a all"
+    if (( ${#plain} + ${#extra} <= cols )); then
+        out+="${C_DIM} · ${C_KEY}a${C_DIM} all${C_OFF}"; plain+=$extra
+    fi
+    extra=" · ss keep"
+    if (( ${#plain} + ${#extra} <= cols )); then
+        out+="${C_DIM} · ${C_KEY}ss${C_DIM} keep${C_OFF}"; plain+=$extra
+    fi
+    if [[ "$sort_mode" == created || "$sort_mode" == pushed ]]; then
+        if [[ -f "$gh_cache" ]]; then
+            extra=" · GitHub $(( ( $(now_epoch) - $(stat -c %Y "$gh_cache") ) / 3600 ))h old"
+        else
+            extra=" · GitHub dates fetching, local meanwhile"
+        fi
+        (( ${#plain} + ${#extra} <= cols )) && out+="${C_DIM}${extra}${C_OFF}"
+    fi
+    printf '%s\n' "$out"
 }
 
 # Print the listing. Everything above this is what the listing is *of*; this is
@@ -2690,8 +2899,13 @@ render_listing() {
     order_listing
     sel_total=${#ord_entries[@]}
 
-    local budget=0
+    local budget=0 prompting=0
     (( lr_no_limit )) || budget=$(row_budget)
+    will_prompt && prompting=1
+    if (( prompting )); then
+        sort_bar
+        (( budget > 1 )) && (( budget-- ))
+    fi
 
     focus_n=0
     (( focus_min > 0 && ord_count[0] >= focus_min )) && focus_n=${ord_count[0]}
@@ -2754,14 +2968,18 @@ render_listing() {
 
     (( shown )) || return 1
 
+    # `lsrepos --all` only where there is no prompt to press `a` at — at a prompt
+    # it is on the sort bar above the listing.
+    local all_hint=''
+    (( prompting )) || all_hint="${C_DIM} · ${C_KEY}lsrepos --all${C_HINT} for everything"
     if (( focus_n )); then
         local older=$(( sel_n - focus_n )) more=$(( focus_n - sel_shown ))
         if (( more > 0 )); then
-            printf "${C_DIM}… ${C_HINT}a busy day, so today only: ${C_NOW}1-%d${C_HINT} of ${C_NOW}%d${C_DIM} · ${C_KEY}enter${C_HINT} for more of today${C_DIM} · ${C_HINT}%d older after them${C_DIM} · ${C_KEY}lsrepos --all${C_HINT} for everything${C_OFF}\n" \
-                "$sel_shown" "$focus_n" "$older"
+            printf "${C_DIM}… ${C_HINT}a busy day, so today only: ${C_NOW}1-%d${C_HINT} of ${C_NOW}%d${C_DIM} · ${C_KEY}enter${C_HINT} for more of today${C_DIM} · ${C_HINT}%d older after them%b${C_OFF}\n" \
+                "$sel_shown" "$focus_n" "$older" "$all_hint"
         else
-            printf "${C_DIM}… ${C_HINT}a busy day, so today only: all ${C_NOW}%d${C_DIM} · ${C_NOW}%d${C_HINT} older, numbered ${C_NOW}%d-%d${C_DIM} · ${C_KEY}n${C_HINT} pages to them${C_DIM} · ${C_KEY}lsrepos --all${C_HINT} for everything${C_OFF}\n" \
-                "$focus_n" "$older" "$(( focus_n + 1 ))" "$sel_n"
+            printf "${C_DIM}… ${C_HINT}a busy day, so today only: all ${C_NOW}%d${C_DIM} · ${C_NOW}%d${C_HINT} older, numbered ${C_NOW}%d-%d${C_DIM} · ${C_KEY}n${C_HINT} pages to them%b${C_OFF}\n" \
+                "$focus_n" "$older" "$(( focus_n + 1 ))" "$sel_n" "$all_hint"
         fi
     elif (( hidden )); then
         local hint="lsrepos"
@@ -2771,8 +2989,13 @@ render_listing() {
         esac
         # The elided repos are still numbered, so the footer names the range
         # rather than only offering --all: typing 23 works from here.
-        printf "${C_DIM}… ${C_NOW}%d${C_HINT} more, numbered ${C_NOW}%d-%d${C_DIM} · ${C_KEY}n${C_HINT} pages to them, ${C_KEY}%s --all${C_HINT} prints them${C_OFF}\n" \
-            "$hidden" "$(( sel_shown + 1 ))" "$sel_n" "$hint"
+        if (( prompting )); then
+            printf "${C_DIM}… ${C_NOW}%d${C_HINT} more, numbered ${C_NOW}%d-%d${C_DIM} · ${C_KEY}n${C_HINT} pages to them${C_OFF}\n" \
+                "$hidden" "$(( sel_shown + 1 ))" "$sel_n"
+        else
+            printf "${C_DIM}… ${C_NOW}%d${C_HINT} more, numbered ${C_NOW}%d-%d${C_DIM} · ${C_KEY}n${C_HINT} pages to them, ${C_KEY}%s --all${C_HINT} prints them${C_OFF}\n" \
+                "$hidden" "$(( sel_shown + 1 ))" "$sel_n" "$hint"
+        fi
     fi
     noise_footer
     write_sel_map
@@ -2842,9 +3065,11 @@ cmd_repos() {
         time|recency|recent) sort_mode=time ;;
         activity|visits)     sort_mode=activity ;;
         frecency)            sort_mode=frecency ;;
+        created)             sort_mode=created ;;
+        pushed)              sort_mode=pushed ;;
         name)                sort_mode=name ;;
         '')                  sort_mode=time ;;
-        *)                   die "LSRECENT_SORT must be recency, visits, frecency or name: $LSRECENT_SORT" ;;
+        *)                   die "LSRECENT_SORT must be recency, visits, frecency, created, pushed or name: $LSRECENT_SORT" ;;
     esac
     lr_no_limit=0
     while (( $# )); do
@@ -2857,6 +3082,8 @@ cmd_repos() {
             --name|-n)               sort_mode=name ;;
             --activity|--visits|-A)  sort_mode=activity ;;
             --frecency|-f)           sort_mode=frecency ;;
+            --created|-C)            sort_mode=created ;;
+            --pushed|-P)             sort_mode=pushed ;;
             --since|--within)
                 (( $# >= 2 )) || die "$1 needs a timeframe: today, yesterday, week, month, 3d, 2w ..."
                 since_spec=$2
@@ -3172,6 +3399,7 @@ case "${1:-}" in
     visit)       cmd_visit "${2:-}" ;;
     prune)       load_visits; cmd_prune ;;
     noise)       shift; cmd_noise "$@" ;;
+    refresh-dates) cmd_refresh_dates ;;
     repos)       shift; cmd_repos "$@" ;;
     today)       shift; cmd_repos --today "$@" ;;
     yesterday|yest) shift; cmd_repos --yesterday "$@" ;;
