@@ -115,8 +115,12 @@
 #   /         clear the search and any timeframe, back to the full ranking
 #   @3d text  search only what was touched in a timeframe (@today, @yesterday,
 #             @week, @month, @3d, @2w); @ alone drops the timeframe
+#   t y w     just today, just yesterday, the last 7 days: the day bar over the
+#             listing, with how many repos each holds
+#   left/right  in one of those, the next older or newer day that has anything
+#             in it, redrawn in place (< and > at the plain prompt)
 #   n  or +   next page                 p  or -   previous page
-#   t         back to the top of this view
+#   top       back to the top of this view (t in lstoday and lsyesterday)
 #   a         everything in this view, unpaged
 #   s         cycle the order inside each group: recency → frecency → visits → name
 #   sr  recency    sf  frecency    sv  visits    sn  name
@@ -208,7 +212,7 @@
 # Repo root defaults to $LSRECENT_REPO_ROOT, else ~/repos/github, else ~/repos.
 # Search depth defaults to $LSRECENT_REPO_DEPTH (4).
 
-VERSION="1.18.0"
+VERSION="1.19.0"
 
 config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/lsrecent"
 config="$config_dir/dirs"
@@ -1645,6 +1649,16 @@ view_filter=''
 # A timeframe over the view (`@today`, `@3d` at the prompt): an epoch, 0 for none.
 view_since=0
 view_since_label=''
+# The end of a timeframe, exclusive, 0 for none: what makes a day one day rather
+# than "since that day".
+view_until=0
+# Which entry of the day bar the view is: '' for none, day or week. view_day is
+# the midnight opening the day on screen.
+view_pick=''
+view_day=0
+# Whether this listing can be walked by day at all. Not under lstoday, lsyesterday
+# or --since: those have already cut the ranking down, so yesterday is not in it.
+lr_days=0
 # Where the next page has to stop short of the end of the view: set to focus_n
 # while enter is paging through a busy day's TODAY, so that "more" means more of
 # today and the older repos do not spill onto the same page. 0 = the end.
@@ -1698,7 +1712,7 @@ fold_needle() {
 # exactly what is under the TODAY header above it, no more and no fewer.
 entry_since() {
     entry_ts "$1"
-    (( ets >= view_since ))
+    (( ets >= view_since && (view_until == 0 || ets < view_until) ))
 }
 
 # The date ranking entry $1 is listed by, into `ets` (no fork: once per entry).
@@ -1772,8 +1786,8 @@ build_view() {
     # is the one you are looking for far more often than the one whose name
     # happens to match best. search_order = match keeps the tiers above.
     view_chrono=1
-    if [[ -n "$needle$list_filter" ]]; then
-        if [[ "${lr_search_order:-newest}" == match ]]; then
+    if [[ -n "$needle$list_filter" || "$view_pick" == week ]]; then
+        if [[ "${lr_search_order:-newest}" == match && "$view_pick" != week ]]; then
             [[ -n "$needle" ]] && view_chrono=0
         else
             sort_view_newest
@@ -1819,11 +1833,13 @@ plan_view_layout() {
     vp_page=0
     (( budget > 0 )) && vp_page=$(( budget * vp_per ))
     # The cursor list is one entry per row, and spends two rows of the budget on
-    # its TODAY / EARLIER bars.
+    # its TODAY / EARLIER bars, and one more on the day bar when it has one.
     if view_narrowed; then
         vp_per=1
         vp_page=0
-        (( budget > 0 )) && vp_page=$(( budget > 4 ? budget - 2 : 2 ))
+        local chrome=2
+        [[ -n "$view_pick" ]] && chrome=3
+        (( budget > 0 )) && vp_page=$(( budget > chrome + 2 ? budget - chrome : 2 ))
     fi
     return 0
 }
@@ -1860,6 +1876,7 @@ render_page() {
     local unlimited=${1:-}
     local total=${#view[@]}
     if (( total == 0 )); then
+        [[ -n "$view_pick" ]] && day_bar > /dev/tty
         if [[ -n "$view_filter" ]]; then
             printf "${C_HINT}nothing matches ${C_NOW}\"%s\"%s${C_DIM} — ${C_KEY}/${C_HINT} on its own clears the search${C_OFF}\n" \
                 "$view_filter" "${view_since_label:+ ${view_since_label}}" > /dev/tty
@@ -2001,6 +2018,11 @@ count_vis_rows() {
 
 # Rows the last drawn list block took (bars, entries, footer), for the redraw.
 lb_rows=0
+# Whether that block is still what sits directly above the prompt, with nothing
+# typed or printed under it since, so that it can be wiped and replaced.
+list_clean=0
+# Set for one draw: the next day is to replace the block on screen, not follow it.
+day_inplace=0
 
 # Print a page of the cursor list from view_from and advance it. With $1 set,
 # the whole view regardless of the row budget.
@@ -2029,10 +2051,18 @@ draw_list_block() {
     local pathw=$(( cols - 1 - fixed - lw ))
 
     local any_today=0 k n label path base mark prev=-1 home=$HOME
-    if (( view_chrono && total )); then
+    # One day is one day: a bar saying so would only repeat the day bar over it.
+    if (( view_chrono && total )) && [[ "$view_pick" != day ]]; then
         entry_ts "${view[0]}"; when_label "$ets"; any_today=$when_today
     fi
     lb_rows=0
+    if [[ -n "$view_pick" ]]; then
+        local bar
+        bar=$(day_bar arrows)
+        printf '%s\e[K\n' "$bar" > /dev/tty
+        count_vis_rows "$bar" "$cols"
+        lb_rows=$vis_rows
+    fi
     for (( k = page_start; k < view_from; k++ )); do
         n=${view[k]}
         entry_ts "$n"; when_label "$ets"
@@ -2084,6 +2114,7 @@ draw_list_block() {
     printf '%s\e[K\n' "$foot" > /dev/tty
     count_vis_rows "$foot" "$cols"
     lb_rows=$(( lb_rows + vis_rows ))
+    list_clean=1
 }
 
 # The prompt under a cursor list. Its row count is kept for the redraw.
@@ -2128,6 +2159,20 @@ list_move() {
     fi
 }
 
+# Left or right at a cursor list on the day bar: the reply that walks there, or
+# nothing at all at either end, where there is no day to go to and a message
+# would only get in the way of the redraw. Off the day bar they are not keys.
+day_key() {
+    [[ -n "$view_pick" ]] || return 1
+    day_step_target "$1" || return 1
+    if (( list_clean && lb_rows + lp_prompt_rows <= $(term_rows) )); then
+        day_inplace=1
+    else
+        printf '\n' > /dev/tty
+    fi
+    if [[ "$1" == older ]]; then reply='<'; else reply='>'; fi
+}
+
 # Read one answer at a cursor list into `reply`, in the same language as the
 # line prompt: enter becomes the number under the cursor, ctrl-d and Esc become
 # q, and any other key starts an ordinary line — prefilled with that key — so a
@@ -2146,6 +2191,8 @@ read_list_reply() {
                 case "$seq" in
                     '[A'|'OA') list_move -1 ;;
                     '[B'|'OB') list_move 1 ;;
+                    '[D'|'OD') day_key older && return 0 ;;
+                    '[C'|'OC') day_key newer && return 0 ;;
                     '') printf '\n' > /dev/tty; reply=q; return 0 ;;
                     *)  # Another sequence (PgUp, F-keys): swallow its tail.
                         IFS= read -rsn8 -t 0.02 seq < /dev/tty ;;
@@ -2155,6 +2202,7 @@ read_list_reply() {
             $'\x04') printf '\n' > /dev/tty; reply=q; return 0 ;;
             $'\x7f'|$'\b'|$'\t') ;;
             *)
+                list_clean=0
                 IFS= read -e -r -i "$c" reply < /dev/tty || { printf '\n' > /dev/tty; reply=q; }
                 return 0 ;;
         esac
@@ -2186,9 +2234,17 @@ browse_help() {
     help_row '/'    'clear the search (and any timeframe), back to the full ranking'
     help_row '@3d text' 'search only what was touched in a timeframe: @today, @yesterday, @week, @month, @3d, @2w'
     help_row '@'    'drop the timeframe, keep the search'
+    if (( lr_days )); then
+        help_row 't y w' 'just today, just yesterday, the last 7 days'
+        help_row '← →'   'in one of those: the next older or newer day with anything in it (< > at the plain prompt)'
+    fi
     help_row 'n  +' 'next page'
     help_row 'p  -' 'previous page'
-    help_row 't'    'back to the top of this view'
+    if (( lr_days )); then
+        help_row 'top' 'back to the top of this view'
+    else
+        help_row 't'   'back to the top of this view'
+    fi
     help_row 'a'    'everything in this view, unpaged'
     help_row 's'    "cycle the order: recency → frecency → visits → created → pushed → name"
     help_sort_row 'sr' time
@@ -2236,6 +2292,140 @@ resort() {
     # entry; a filtered one has its own first result and nothing above the prompt
     # to continue from.
     if [[ -n "$view_filter$view_since_label" ]]; then render_page; else view_from=$sel_shown; fi
+}
+
+# --- the day bar --------------------------------------------------------------
+#
+# The listing's own buckets as things to go to: t, y and w put one day, or the
+# week, on the screen, and left and right walk from there. A day is exactly what
+# sits under that day's header in the listing, since it is cut on the same dates.
+# The numbers do not change: 23 is the same repo here as in the listing.
+
+# Forget any timeframe, from the bar or from `@`.
+clear_timeframe() {
+    view_since=0; view_since_label=''; view_until=0; view_pick=''; view_day=0
+}
+
+# The line itself, printed above the listing and above a day. With $1, the walking
+# keys are the arrows, as they are at a cursor list; the line prompt cannot read
+# an arrow, so there they are < and >. The entry in force is lit, as on the sort
+# bar. A walked-to day has no key of its own, so it appears between the arrows.
+day_bar() {
+    local keys='<  >' week=0 i k name n item out='' walked='days' c=$C_DIM
+    (( ${1:+1} )) && keys='←  →'
+    for (( i = 0; i <= 6; i++ )); do week=$(( week + ${ord_count[i]:-0} )); done
+    for k in t y w; do
+        case $k in
+            t) name=today;     n=${ord_count[0]:-0} ;;
+            y) name=yesterday; n=${ord_count[1]:-0} ;;
+            w) name=week;      n=$week ;;
+        esac
+        if [[ "$view_pick $view_since_label" == "day $name" \
+           || ( "$k" == w && "$view_pick" == week ) ]]; then
+            item="${C_KEY}$k ${C_NOW}$name $n${C_OFF}"
+        else
+            item="${C_KEY}$k ${C_DIM}$name ${C_HINT}$n${C_OFF}"
+        fi
+        out+="$item  "
+    done
+    if [[ "$view_pick" == day && "$view_since_label" == on\ * ]]; then
+        walked=${view_since_label#on }; c=$C_NOW
+    fi
+    printf '%s%s%s %s%s%s\n' "$out" "$C_KEY" "${keys%% *}" "$c" "$walked" \
+        "$C_KEY ${keys##* }$C_OFF"
+}
+
+# The midnight opening the day `$1` falls in, into `day_lo`. Taking off the wall
+# clock lands an hour out across a DST change, which snap_midnight then corrects.
+day_lo=0
+day_start() {
+    local h m s
+    printf -v h '%(%H)T' "$1"
+    printf -v m '%(%M)T' "$1"
+    printf -v s '%(%S)T' "$1"
+    day_lo=$(snap_midnight "$(( $1 - (10#$h * 3600 + 10#$m * 60 + 10#$s) ))")
+}
+
+# Put the day opening at midnight $1 in the view, keeping any search. Today has no
+# upper end, so that a repo dated ahead of the clock stays where the listing's
+# TODAY puts it. Six in the morning of the next day is safely past its midnight
+# and nearer to it than to any other, on a 23-hour day and a 25-hour one alike.
+show_day() {
+    view_pick=day; view_day=$1; view_since=$1; view_until=0
+    if (( $1 >= day_mid[0] )); then
+        view_since_label=today
+    else
+        view_until=$(snap_midnight "$(( $1 + 108000 ))")
+        if (( $1 == day_mid[1] )); then
+            view_since_label=yesterday
+        else
+            printf -v view_since_label 'on %(%a %b %-d)T' "$1"
+        fi
+    fi
+    build_view
+    draw_day
+}
+
+# The last seven calendar days, today included: TODAY down to 6 DAYS AGO.
+show_week() {
+    view_pick=week; view_day=0; view_since=${day_mid[6]}; view_until=0
+    view_since_label='in the last 7 days'
+    build_view
+    draw_day
+}
+
+# Print the view, over the last one if it is going to replace it.
+draw_day() {
+    if (( day_inplace )); then
+        day_inplace=0
+        printf '\r\e[%dA\e[J' "$(( lb_rows + lp_prompt_rows - 1 ))" > /dev/tty
+    fi
+    render_page
+}
+
+# The next day older or newer ($1) than the one on screen that has anything to
+# show, into `day_target`; fails when there is none. Today is the place to start
+# from when no day is on screen. Going by the entries rather than by the calendar
+# is what keeps an empty weekend from being two presses of nothing, and what lets
+# the walk carry on past the last week. A search in force counts: a day with no
+# match is as empty as a day with no repos.
+day_target=0
+day_step_target() {
+    local dir=$1 from=$view_day needle best=0 i hi
+    (( from )) || from=${day_mid[0]}
+    needle=$(fold_needle "$view_filter")
+    if [[ "$dir" == newer ]]; then
+        (( from >= day_mid[0] )) && return 1
+        hi=$(snap_midnight "$(( from + 108000 ))")
+    fi
+    for (( i = 1; i <= sel_n; i++ )); do
+        [[ -n "${sel_names[i]:-}" ]] || continue
+        entry_ts "$i"
+        (( ets > 0 )) || continue
+        if [[ "$dir" == older ]]; then
+            (( ets < from && ets > best )) || continue
+        else
+            (( ets >= hi && (best == 0 || ets < best) )) || continue
+        fi
+        [[ -z "$needle" ]] || match_tier "${sel_names[i]}" "${sel_paths[i]}" "$needle" || continue
+        best=$ets
+    done
+    (( best )) || return 1
+    day_start "$best"
+    day_target=$day_lo
+}
+
+# `<` and `>`, and what the arrows turn into. From the listing or the week, `>` is
+# today: there is nothing newer to walk to, but today is a day it can show.
+day_step() {
+    if day_step_target "$1"; then
+        show_day "$day_target"
+    elif [[ "$1" == newer && "$view_pick" != day ]]; then
+        show_day "${day_mid[0]}"
+    else
+        printf "${C_HINT}no %s day%s${C_OFF}\n" "$1" \
+            "${view_filter:+ with a match}" > /dev/tty
+    fi
 }
 
 # A page of a busy day's TODAY: laid out over today's labels alone and stopping at
@@ -2287,7 +2477,7 @@ settings_redraw() {
     bucket_repos "$lr_root" "$lr_full"
     printf "${C_DIM}— redrawn with the new settings, renumbered${C_OFF}\n" > /dev/tty
     render_listing
-    view_filter=''; view_since=0; view_since_label=''
+    view_filter=''; clear_timeframe
     build_view
     view_from=$sel_shown
 }
@@ -2322,6 +2512,18 @@ browse() {
             read_list_reply
         else
             read_line_reply || return 0
+        fi
+
+        # The day bar. Only where it is drawn: elsewhere t is the top of the view
+        # and a y or a w is the start of a search, as they always were.
+        if (( lr_days )); then
+            case "$reply" in
+                t|T) show_day "${day_mid[0]}"; continue ;;
+                y|Y) show_day "${day_mid[1]}"; continue ;;
+                w|W) show_week; continue ;;
+                '<') day_step older; continue ;;
+                '>') day_step newer; continue ;;
+            esac
         fi
 
         case "$reply" in
@@ -2416,10 +2618,10 @@ browse() {
             c|C|/c|/config|/settings|/set)
                 settings_redraw; continue ;;
             /)
-                view_filter=''; view_since=0; view_since_label=''
+                view_filter=''; clear_timeframe
                 build_view; render_top; continue ;;
             @)
-                view_since=0; view_since_label=''
+                clear_timeframe
                 build_view; render_top; continue ;;
             @*)
                 # `@today`, `@3d`, `@2w claude`: a timeframe, then optionally a
@@ -2435,6 +2637,7 @@ browse() {
                         "$spec" > /dev/tty
                     continue
                 fi
+                clear_timeframe
                 view_since=$since_lo; view_since_label=$since_label
                 view_filter=$text
                 build_view; render_page; continue ;;
@@ -2903,6 +3106,10 @@ render_listing() {
     (( lr_no_limit )) || budget=$(row_budget)
     will_prompt && prompting=1
     if (( prompting )); then
+        if (( lr_days )); then
+            day_bar
+            (( budget > 1 )) && (( budget-- ))
+        fi
         sort_bar
         (( budget > 1 )) && (( budget-- ))
     fi
@@ -3113,6 +3320,8 @@ cmd_repos() {
     [[ -d "$root" ]] || die "not a directory: $root"
 
     lr_full=$full
+    lr_days=0
+    [[ -z "$want_window$since_spec" ]] && lr_days=1
     listing_settings
 
     load_visits

@@ -344,9 +344,11 @@ what it had just numbered. It accepts more than a number:
 | `/` | clear the search and any timeframe, back to the full ranking |
 | `@today text` | search only what was touched in a timeframe — `@today`, `@yesterday`, `@week`, `@month`, `@3d`, `@2w`; the text is optional |
 | `@` | drop the timeframe, keep the search |
+| `t` / `y` / `w` | [just today, just yesterday, the last 7 days](#walking-between-days) |
+| ← → (`<` `>` at the plain prompt) | the next older or newer day with anything in it |
 | `n` or `+` | next page |
 | `p` or `-` | previous page |
-| `t` | back to the top of the current view |
+| `top` | back to the top of the current view (`t` too under `lstoday`, `lsyesterday` and `--since`) |
 | `a` | everything in the current view, unpaged |
 | `s` | cycle the order inside each group: recency → frecency → visits → name |
 | `sr` / `sf` / `sv` / `sn` | go straight to that order — recency, frecency, visits, name |
@@ -655,6 +657,48 @@ It is not the same as `lstoday`. `lstoday` reads the visit log alone, so it
 lists what you `cd`'d into; `--since today` cuts over the listing's own dates,
 the newer of visit and filesystem, so it keeps exactly what sits under the TODAY
 header, including a repo you only edited from another directory.
+
+## Walking between days
+
+A small line sits above the listing, over the sort keys, with what each day holds:
+
+```
+t today 21  y yesterday 75  w week 284  < days >
+sr recency  sf frecency  sv visits  sc created  sp pushed  sn name · a all · ss keep
+━━ TODAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+`t`, `y` and `w` at the prompt put that day, or the week, on the screen as a
+[cursor list](#search-results-newest-first-with-a-cursor), the bar still over it
+with the one in force lit. From there **← and → walk day by day with no enter**,
+redrawn in place, so going through a week leaves one copy in the scrollback:
+
+```
+t today 21  y yesterday 75  w week 284  ← Tue Nov 3 →
+▶ 117 Residence Homepage     Tue 20:15   ~/repos/github/homelab-infra/Residence-Homepage
+  118 gerber prime 6000…     Tue 19:38   ~/repos/github/smart-home/gerber-prime-6000-mqtt
+… 1-24 of 58 touched on Tue Nov 3 · n next 24
+```
+
+- A day is one calendar day, exactly what sits under that day's header in the
+  listing. That differs from `@yesterday`, which means yesterday *and* today.
+- `w` is the last seven calendar days, today included (TODAY down to 6 DAYS AGO),
+  the same as `@week`, not the week since Sunday. It is always newest first.
+- Walking skips days with nothing in them and carries on past the last week, back
+  to the oldest repo. At either end the arrows do nothing.
+- A search in force stays: `claude`, then `y`, is yesterday's matches, and the walk
+  stops only at days with a match. `/` clears both, `@` just the day.
+- The plain prompt reads a line at a time and cannot see an arrow, so there it is
+  `<` and enter, which lands on a cursor list where the arrows work. `<` from the
+  listing goes to the newest day before today.
+- `t`, `y` and `w` act on enter even in a cursor list. Acting on the keypress
+  alone would make it impossible to start a search for `yaml` or `whisper` there.
+  A search for the single letter `t`, `y` or `w` needs its slash: `/y`.
+- Under `lstoday`, `lsyesterday` and `--since` there is no bar: the ranking is
+  already cut down, so the other days are not in it. `t` is the top of the view
+  there and `y` and `w` search, as they did before 1.19.0.
+
+The numbers do not change: 23 is the same repo in a day as in the listing.
 
 ## Names with spaces
 

@@ -1,3 +1,18 @@
+lsrecent (1.19.0) unstable; urgency=low
+
+  * A day bar above the listing: t today, y yesterday, w the last 7 days, each
+    with how many repos it holds. Each opens as a cursor list with the bar over
+    it and the entry in force lit.
+  * Left and right in one of those walk to the next older or newer day that has
+    anything in it, redrawn in place, past the last week and through to the
+    oldest repo. At the plain prompt the same is < and >.
+  * A search stays in force across all of it, and the walk skips days with no
+    match. / clears both, @ just the day.
+  * t at the prompt is now today; `top` is the top of the view. Under lstoday,
+    lsyesterday and --since nothing has changed: no bar, t is the top.
+
+ -- Daniel Rosehill <daniel@danielrosehill.co.il>  Thu, 05 Nov 2026 12:00:00 +0200
+
 lsrecent (1.18.0) unstable; urgency=low
 
   * Two new orders: created (sc, --created/-C), newest repository first by
